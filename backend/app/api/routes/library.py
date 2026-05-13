@@ -2686,7 +2686,7 @@ def _strip_3mf_embedded_settings(zip_bytes: bytes) -> bytes:
     return dst.getvalue()
 
 
-# Keys in ``Metadata/project_settings.config`` that BambuStudio writes ``"-1"``
+# Keys in ``Metadata/project_settings.config`` that BambuStudio writes ``-1``
 # to when the user wants the value inherited from the parent process preset.
 # The CLI's ``StaticPrintConfig`` validator runs against the embedded settings
 # *before* ``--load-settings`` overrides apply, so a sentinel ``"-1"`` trips
@@ -2711,19 +2711,45 @@ _PROJECT_SETTINGS_SENTINEL_KEYS = frozenset(
 )
 
 
+_PROJECT_SETTINGS_ZERO_FILAMENT_SENTINEL_KEYS = frozenset(
+    {
+        # Bambu Studio uses 0 here for "default/current filament", but some
+        # CLI builds validate embedded project settings against a 1-based
+        # filament index range before --load-settings takes over.
+        "solid_infill_filament",
+        "sparse_infill_filament",
+        "support_filament",
+        "support_interface_filament",
+        "wall_filament",
+    }
+)
+
+
+def _is_scalar_sentinel(value: object, sentinel: int) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int | float):
+        return value == sentinel
+    if isinstance(value, str):
+        return value.strip() == str(sentinel)
+    return False
+
+
 def _sanitize_project_settings_sentinels(zip_bytes: bytes) -> bytes:
-    """Strip ``"-1"`` inherit-from-parent sentinels from the 3MF's
+    """Strip inherit/default sentinels from the 3MF's
     ``Metadata/project_settings.config`` so the slicer CLI's range validator
     accepts the file (#1201).
 
     Removes only allowlisted keys (see ``_PROJECT_SETTINGS_SENTINEL_KEYS``)
-    when their value is exactly ``"-1"``. The rest of the config — and every
-    other entry in the zip — is preserved byte-for-byte. Unlike the earlier
-    full-strip experiment (see ``_strip_3mf_embedded_settings`` and the
-    cautionary comment in ``_run_slicer_with_fallback``) this leaves
-    ``StaticPrintConfig`` initialisation intact: the file is still present,
-    still parses, and the slicer falls back to the supplied
-    ``--load-settings`` value for the removed key.
+    when their value is exactly ``-1`` or ``"-1"``, plus allowlisted filament
+    assignment keys whose value is exactly ``0`` or ``"0"``. The rest of the
+    config — and every other entry in the zip — is preserved byte-for-byte.
+    Unlike the earlier full-strip experiment (see
+    ``_strip_3mf_embedded_settings`` and the cautionary comment in
+    ``_run_slicer_with_fallback``) this leaves ``StaticPrintConfig``
+    initialisation intact: the file is still present, still parses, and the
+    slicer falls back to the supplied ``--load-settings`` value for the
+    removed key.
 
     Returns the original bytes unchanged when no sanitisation is needed
     (input isn't a valid zip, no ``project_settings.config``, no allowlisted
@@ -2742,14 +2768,22 @@ def _sanitize_project_settings_sentinels(zip_bytes: bytes) -> bytes:
                 return zip_bytes
             if not isinstance(config, dict):
                 return zip_bytes
-            removed = [key for key in _PROJECT_SETTINGS_SENTINEL_KEYS if config.get(key) == "-1"]
+            removed = [
+                key for key in _PROJECT_SETTINGS_SENTINEL_KEYS if _is_scalar_sentinel(config.get(key), -1)
+            ]
+            removed.extend(
+                key
+                for key in _PROJECT_SETTINGS_ZERO_FILAMENT_SENTINEL_KEYS
+                if _is_scalar_sentinel(config.get(key), 0)
+            )
             if not removed:
                 return zip_bytes
-            for key in removed:
+            for key in set(removed):
                 config.pop(key, None)
             patched = json.dumps(config)
             logger.info(
-                "3MF sanitiser: removed sentinel '-1' for keys %s — slicer will use --load-settings defaults",
+                "3MF sanitiser: removed project_settings sentinel values for keys %s — "
+                "slicer will use --load-settings defaults",
                 sorted(removed),
             )
             dst = BytesIO()

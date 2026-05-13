@@ -11,14 +11,16 @@ CLI exits non-zero. The user sees::
     Param values in 3mf/config error:
     raft_first_layer_expansion: -1 not in range [0.0, 3.4e+38]
     tree_support_wall_count: -1 not in range [0.0, 2.0]
+    wall_filament: 0 not in range [1.0, ...]
 
 Earlier the codebase tried to fix this by stripping
 ``Metadata/project_settings.config`` (and its sibling configs) entirely.
 That broke ``StaticPrintConfig`` initialisation — see the comment block
 inside ``_run_slicer_with_fallback`` — so the strip-everything path was
 reverted. The current fix is surgical: open the embedded config, drop
-*only* the allowlisted keys when their value is exactly ``"-1"``, and
-re-zip. The slicer then falls back to the supplied ``--load-settings``
+*only* the allowlisted keys when they carry invalid inherit/default
+sentinels (``-1`` or ``0`` depending on field type), and re-zip. The slicer
+then falls back to the supplied ``--load-settings``
 default for the removed keys, while every other entry in the zip stays
 byte-identical.
 
@@ -35,6 +37,7 @@ import pytest
 
 from backend.app.api.routes.library import (
     _PROJECT_SETTINGS_SENTINEL_KEYS,
+    _PROJECT_SETTINGS_ZERO_FILAMENT_SENTINEL_KEYS,
     _rewrite_3mf_project_settings_for_profiles,
     _sanitize_project_settings_sentinels,
 )
@@ -77,12 +80,23 @@ class TestRemovesSentinelValues:
         # cleanly on top of what the user actually configured.
         assert cfg["layer_height"] == "0.2"
 
+    def test_removes_allowlisted_key_when_minus_one_is_numeric(self):
+        original = _make_3mf(settings={"tree_support_wall_count": -1, "layer_height": "0.2"})
+        sanitised = _sanitize_project_settings_sentinels(original)
+
+        cfg = _read_settings(sanitised)
+        assert "tree_support_wall_count" not in cfg
+        assert cfg["layer_height"] == "0.2"
+
     def test_removes_multiple_sentinels_at_once(self):
         original = _make_3mf(
             settings={
                 "raft_first_layer_expansion": "-1",
                 "tree_support_wall_count": "-1",
                 "prime_tower_brim_width": "-1",
+                "wall_filament": 0,
+                "solid_infill_filament": "0",
+                "sparse_infill_filament": 0,
                 "layer_height": "0.2",
             }
         )
@@ -92,6 +106,19 @@ class TestRemovesSentinelValues:
         assert "raft_first_layer_expansion" not in cfg
         assert "tree_support_wall_count" not in cfg
         assert "prime_tower_brim_width" not in cfg
+        assert "wall_filament" not in cfg
+        assert "solid_infill_filament" not in cfg
+        assert "sparse_infill_filament" not in cfg
+        assert cfg["layer_height"] == "0.2"
+
+    @pytest.mark.parametrize("key", sorted(_PROJECT_SETTINGS_ZERO_FILAMENT_SENTINEL_KEYS))
+    @pytest.mark.parametrize("value", [0, "0"])
+    def test_removes_zero_filament_assignment_sentinels(self, key, value):
+        original = _make_3mf(settings={key: value, "layer_height": "0.2"})
+        sanitised = _sanitize_project_settings_sentinels(original)
+
+        cfg = _read_settings(sanitised)
+        assert key not in cfg
         assert cfg["layer_height"] == "0.2"
 
 
@@ -132,6 +159,12 @@ class TestPreservesUnaffectedValues:
         sanitised = _sanitize_project_settings_sentinels(original)
         cfg = _read_settings(sanitised)
         assert cfg["raft_first_layer_expansion"] == ["-1", "0"]
+
+    def test_does_not_strip_array_value_even_if_zero_filament_sentinel_key(self):
+        original = _make_3mf(settings={"wall_filament": ["0", "1"]})
+        sanitised = _sanitize_project_settings_sentinels(original)
+        cfg = _read_settings(sanitised)
+        assert cfg["wall_filament"] == ["0", "1"]
 
 
 class TestZipPreservation:
