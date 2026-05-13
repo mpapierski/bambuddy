@@ -1188,6 +1188,7 @@ export interface SliceRequest {
   // backend validator promotes a singular into a one-element list when this
   // is omitted, so legacy single-color clients keep working unchanged.
   filament_presets?: PresetRef[];
+  filament_mode?: 'embedded' | 'override';
   // Bundle dispatch: when set, the backend skips PresetRef resolution and
   // picks the JSON triplet from a sidecar-stored .bbscfg by name. Mutually
   // exclusive with the preset fields above (validator accepts both, but
@@ -1224,6 +1225,8 @@ export interface UnifiedPreset {
   // responses pre-date these fields entirely.
   filament_type?: string | null;
   filament_colour?: string | null;
+  device_kind?: string | null;
+  compatible_device_kinds?: string[];
 }
 export interface UnifiedPresetsBySlot {
   printer: UnifiedPreset[];
@@ -1235,6 +1238,7 @@ export interface UnifiedPresetsResponse {
   local: UnifiedPresetsBySlot;
   standard: UnifiedPresetsBySlot;
   cloud_status: SlicerCloudStatus;
+  available_device_kinds: string[];
 }
 
 export interface SliceResponse {
@@ -3891,6 +3895,8 @@ export const api = {
         color: string;
         used_grams: number;
         used_meters: number;
+        profile_name?: string | null;
+        tray_info_idx?: string | null;
         used_in_plate?: boolean;
       }>;
     }>(`/archives/${archiveId}/filament-requirements${qs.toString() ? `?${qs}` : ''}`);
@@ -5362,6 +5368,8 @@ export const api = {
         color: string;
         used_grams: number;
         used_meters: number;
+        profile_name?: string | null;
+        tray_info_idx?: string | null;
         used_in_plate?: boolean;
       }>;
     }>(`/library/files/${fileId}/filament-requirements${qs.toString() ? `?${qs}` : ''}`);

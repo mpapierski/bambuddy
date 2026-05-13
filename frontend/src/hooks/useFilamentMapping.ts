@@ -261,7 +261,9 @@ export interface FilamentRequirement {
   color: string;
   used_grams: number;
   /** Unique spool identifier from slicing (e.g., "GFA00", "P4d64437") */
-  tray_info_idx?: string;
+  tray_info_idx?: string | null;
+  /** Embedded 3MF filament profile name, when present. */
+  profile_name?: string | null;
   /** Target nozzle for dual-nozzle printers (0=right, 1=left) */
   nozzle_id?: number;
 }

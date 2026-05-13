@@ -45,6 +45,11 @@ from backend.app.services.slicer_api import (
     SlicerApiUnavailableError,
     SlicerInputError,
 )
+from backend.app.utils.printer_models import (
+    infer_device_kinds_from_strings,
+    normalize_device_kind,
+    sort_device_kinds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +90,56 @@ _CLOUD_TYPE_TO_SLOT = {
 
 def _empty_slots() -> dict[str, list[UnifiedPreset]]:
     return {"printer": [], "process": [], "filament": []}
+
+
+def _profile_device_metadata(
+    *,
+    slot: str,
+    name: str,
+    setting: dict | None = None,
+    compatible_printers: str | None = None,
+) -> dict[str, object]:
+    setting = setting or {}
+    candidates: list[str | None] = [name]
+    for key in (
+        "printer_model",
+        "printer_settings_id",
+        "default_printer_profile",
+        "print_settings_id",
+        "default_print_profile",
+    ):
+        value = setting.get(key)
+        if isinstance(value, str):
+            candidates.append(value)
+
+    compat_values: list[str | None] = []
+    for key in ("print_compatible_printers", "compatible_printers"):
+        value = setting.get(key)
+        if isinstance(value, list):
+            compat_values.extend(v for v in value if isinstance(v, str))
+        elif isinstance(value, str):
+            compat_values.append(value)
+    compat_values.extend(_parse_compatible_printers(compatible_printers))
+
+    compatible = infer_device_kinds_from_strings(compat_values)
+    own = None
+    for candidate in candidates:
+        own = normalize_device_kind(candidate)
+        if own:
+            break
+    if own is None and len(compatible) == 1:
+        own = compatible[0]
+
+    # Process presets often only expose compatibility lists. Mirror the
+    # singular value into the compatible list so the frontend can filter
+    # consistently by selected device.
+    all_compatible = set(compatible)
+    if own:
+        all_compatible.add(own)
+    return {
+        "device_kind": own if slot in ("printer", "process") else None,
+        "compatible_device_kinds": sort_device_kinds(all_compatible),
+    }
 
 
 async def _fetch_cloud_presets(db: AsyncSession, user: User | None) -> tuple[dict[str, list[UnifiedPreset]], str]:
@@ -142,7 +197,8 @@ async def _fetch_cloud_presets(db: AsyncSession, user: User | None) -> tuple[dic
                 if not name or not setting_id or name in seen_names:
                     continue
                 seen_names.add(name)
-                slots[slot].append(UnifiedPreset(id=setting_id, name=name, source="cloud"))
+                extra = _profile_device_metadata(slot=slot, name=name)
+                slots[slot].append(UnifiedPreset(id=setting_id, name=name, source="cloud", **extra))
 
         # Cloud filament presets carry no metadata in this response on
         # purpose: the per-preset detail endpoint
@@ -172,30 +228,52 @@ async def _fetch_local_presets(db: AsyncSession) -> dict[str, list[UnifiedPreset
         slot = type_to_slot.get(p.preset_type)
         if slot is None:
             continue
-        extra: dict[str, str | None] = {}
+        setting = _parse_setting_json(p.setting)
+        extra: dict[str, object] = _profile_device_metadata(
+            slot=slot,
+            name=p.name,
+            setting=setting,
+            compatible_printers=p.compatible_printers,
+        )
         if slot == "filament":
-            extra["filament_type"], extra["filament_colour"] = _parse_filament_metadata(p.setting)
+            extra["filament_type"], extra["filament_colour"] = _parse_filament_metadata(setting)
         slots[slot].append(
             UnifiedPreset(id=str(p.id), name=p.name, source="local", **extra),
         )
     return slots
 
 
-def _parse_filament_metadata(setting_json: str | None) -> tuple[str | None, str | None]:
+def _parse_setting_json(setting_json: str | None) -> dict:
+    if not setting_json:
+        return {}
+    try:
+        data = json.loads(setting_json)
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _parse_compatible_printers(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return [raw]
+    if isinstance(parsed, list):
+        return [v for v in parsed if isinstance(v, str)]
+    if isinstance(parsed, str):
+        return [parsed]
+    return []
+
+
+def _parse_filament_metadata(setting: dict) -> tuple[str | None, str | None]:
     """Extract first-slot ``filament_type`` and ``filament_colour`` from a
     stored preset JSON. OrcaSlicer stores both as arrays (per-extruder) — we
     take the first entry since pre-pick matching is one-slot-at-a-time.
     Defensive parse: any error returns (None, None) so a corrupt row never
     breaks the listing."""
-    if not setting_json:
-        return None, None
-    try:
-        data = json.loads(setting_json)
-    except (ValueError, TypeError):
-        return None, None
-    if not isinstance(data, dict):
-        return None, None
-    return _first_scalar(data.get("filament_type")), _first_scalar(data.get("filament_colour"))
+    return _first_scalar(setting.get("filament_type")), _first_scalar(setting.get("filament_colour"))
 
 
 def _first_scalar(value: object) -> str | None:
@@ -237,7 +315,11 @@ async def _fetch_bundled_presets(db: AsyncSession) -> dict[str, list[UnifiedPres
                 continue
             # Bundled presets are addressed by name (the slicer resolves them
             # by name during the `inherits:` walk), so name doubles as id.
-            extra: dict[str, str | None] = {}
+            extra: dict[str, object] = _profile_device_metadata(
+                slot=slot,
+                name=name,
+                setting=entry if isinstance(entry, dict) else None,
+            )
             if slot == "filament":
                 extra["filament_type"] = entry.get("filament_type")
                 extra["filament_colour"] = entry.get("filament_colour")
@@ -314,6 +396,14 @@ def _dedupe_by_name(
             if p.filament_type or p.filament_colour:
                 metadata_by_name[p.name] = (p.filament_type, p.filament_colour)
 
+    device_by_slot_name: dict[tuple[str, str], tuple[str | None, list[str]]] = {}
+    for slot in ("printer", "process"):
+        for tier in (local, standard):
+            for p in tier[slot]:
+                key = (slot, p.name)
+                if key not in device_by_slot_name and (p.device_kind or p.compatible_device_kinds):
+                    device_by_slot_name[key] = (p.device_kind, p.compatible_device_kinds)
+
     # Backfill cloud entries that don't have their own metadata.
     for p in cloud["filament"]:
         if (p.filament_type is None or p.filament_colour is None) and p.name in metadata_by_name:
@@ -322,6 +412,16 @@ def _dedupe_by_name(
                 p.filament_type = t
             if p.filament_colour is None and c is not None:
                 p.filament_colour = c
+    for slot in ("printer", "process"):
+        for p in cloud[slot]:
+            key = (slot, p.name)
+            if key not in device_by_slot_name:
+                continue
+            device_kind, compatible = device_by_slot_name[key]
+            if p.device_kind is None:
+                p.device_kind = device_kind
+            if not p.compatible_device_kinds:
+                p.compatible_device_kinds = compatible
 
     deduped_local = _empty_slots()
     deduped_standard = _empty_slots()
@@ -338,6 +438,17 @@ def _dedupe_by_name(
             deduped_standard[slot].append(p)
             seen.add(p.name)
     return cloud, deduped_local, deduped_standard
+
+
+def _available_device_kinds(*tiers: dict[str, list[UnifiedPreset]]) -> list[str]:
+    values: set[str] = set()
+    for tier in tiers:
+        for slot in ("printer", "process"):
+            for preset in tier[slot]:
+                if preset.device_kind:
+                    values.add(preset.device_kind)
+                values.update(preset.compatible_device_kinds or [])
+    return sort_device_kinds(values)
 
 
 @router.get("/presets", response_model=UnifiedPresetsResponse)
@@ -372,6 +483,7 @@ async def list_unified_presets(
         local=UnifiedPresetsBySlot(**local),
         standard=UnifiedPresetsBySlot(**standard),
         cloud_status=cloud_status,
+        available_device_kinds=_available_device_kinds(cloud, local, standard),
     )
 
 

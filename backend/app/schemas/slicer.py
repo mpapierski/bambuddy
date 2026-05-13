@@ -91,6 +91,14 @@ class SliceRequest(BaseModel):
     # is empty so older clients keep working.
     filament_presets: list[PresetRef] = Field(default_factory=list)
 
+    filament_mode: Literal["override", "embedded"] = Field(
+        default="override",
+        description=(
+            "override sends explicit filament presets; embedded leaves 3MF filament settings in place. "
+            "Embedded mode is only valid for 3MF sources and is enforced by the route."
+        ),
+    )
+
     # Bundle dispatch alternative — when set, presets above are ignored and
     # the slicer dispatch picks per-category JSONs from a previously-imported
     # .bbscfg on the sidecar. Validator below short-circuits the
@@ -102,8 +110,8 @@ class SliceRequest(BaseModel):
 
     plate: int | None = Field(
         default=None,
-        ge=1,
-        description="Plate number to slice (1-indexed). Defaults to plate 1 on the sidecar.",
+        ge=0,
+        description="Plate number to slice (0 = all plates, 1-indexed otherwise). Defaults to plate 1 on the sidecar.",
     )
     export_3mf: bool = Field(
         default=False,
@@ -137,6 +145,9 @@ class SliceRequest(BaseModel):
                 )
             if ref is None:
                 setattr(self, ref_attr, PresetRef(source="local", id=str(legacy_id)))
+
+        if self.filament_mode == "embedded":
+            return self
 
         # Filament accepts THREE shapes, in priority order:
         #   1. filament_presets    — multi-color array (new clients)

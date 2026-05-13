@@ -220,3 +220,24 @@ class TestBundleDispatchShape:
         assert req.bundle is not None
         # Presets stay populated; dispatch ignores them when bundle is set.
         assert req.printer_preset is not None
+
+
+class TestEmbeddedFilamentMode:
+    def test_embedded_mode_accepts_no_filament_presets(self):
+        req = SliceRequest(
+            printer_preset=PresetRef(source="standard", id="Bambu Lab X1 Carbon 0.4 nozzle"),
+            process_preset=PresetRef(source="standard", id="0.20mm Standard @BBL X1C"),
+            filament_mode="embedded",
+        )
+        assert req.filament_mode == "embedded"
+        assert req.filament_presets == []
+        assert req.filament_preset is None
+
+    def test_plate_zero_is_valid_for_all_plates(self):
+        req = SliceRequest(
+            printer_preset_id=1,
+            process_preset_id=2,
+            filament_preset_id=3,
+            plate=0,
+        )
+        assert req.plate == 0

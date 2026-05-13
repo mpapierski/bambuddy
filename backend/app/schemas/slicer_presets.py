@@ -38,6 +38,8 @@ class UnifiedPreset(BaseModel):
     source: Literal["cloud", "local", "standard"]
     filament_type: str | None = None
     filament_colour: str | None = None
+    device_kind: str | None = None
+    compatible_device_kinds: list[str] = []
 
 
 class UnifiedPresetsBySlot(BaseModel):
@@ -65,3 +67,4 @@ class UnifiedPresetsResponse(BaseModel):
     local: UnifiedPresetsBySlot = UnifiedPresetsBySlot()
     standard: UnifiedPresetsBySlot = UnifiedPresetsBySlot()
     cloud_status: CloudStatus = "ok"
+    available_device_kinds: list[str] = []

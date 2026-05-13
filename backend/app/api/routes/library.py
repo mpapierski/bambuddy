@@ -66,6 +66,9 @@ from backend.app.services.stl_thumbnail import generate_stl_thumbnail
 from backend.app.utils.threemf_tools import (
     extract_nozzle_mapping_from_3mf,
     extract_project_filaments_from_3mf,
+    extract_project_filament_profile_names_from_3mf,
+    extract_source_device_kind_from_3mf,
+    extract_source_process_profile_name_from_3mf,
     extract_source_printer_model_from_3mf,
 )
 
@@ -2304,13 +2307,17 @@ async def get_library_file_plates(
     except Exception as e:
         logger.warning("Failed to parse plates from library file %s: %s", file_id, e)
 
-    # SliceModal pre-check signal: the source 3MF's bound printer model. The
-    # CLI cannot re-slice for a different printer; surface this so the modal
-    # can warn the user before they pick a mismatched profile.
+    # SliceModal pre-check signal: the source 3MF's bound printer/process.
+    # The modal uses this to default compatible profiles and warn before a
+    # cross-device conversion attempt.
     source_printer_model: str | None = None
+    source_device_kind: str | None = None
+    source_process_profile_name: str | None = None
     try:
         with zipfile.ZipFile(file_path, "r") as zf:
             source_printer_model = extract_source_printer_model_from_3mf(zf)
+            source_device_kind = extract_source_device_kind_from_3mf(zf)
+            source_process_profile_name = extract_source_process_profile_name_from_3mf(zf)
     except (zipfile.BadZipFile, OSError):
         pass
 
@@ -2320,6 +2327,8 @@ async def get_library_file_plates(
         "plates": plates,
         "is_multi_plate": len(plates) > 1,
         "source_printer_model": source_printer_model,
+        "source_device_kind": source_device_kind,
+        "source_process_profile_name": source_process_profile_name,
     }
 
 
@@ -2466,6 +2475,7 @@ async def get_library_file_filament_requirements(
 
     try:
         with zipfile.ZipFile(file_path, "r") as zf:
+            profile_names = extract_project_filament_profile_names_from_3mf(zf)
             # Parse slice_info.config for filament requirements
             if "Metadata/slice_info.config" in zf.namelist():
                 content = zf.read("Metadata/slice_info.config").decode()
@@ -2501,14 +2511,16 @@ async def get_library_file_filament_requirements(
                                     used_grams = 0
 
                                 if used_grams > 0 and filament_id:
+                                    slot_id = int(filament_id)
                                     filaments.append(
                                         {
-                                            "slot_id": int(filament_id),
+                                            "slot_id": slot_id,
                                             "type": filament_type,
                                             "color": filament_color,
                                             "used_grams": round(used_grams, 1),
                                             "used_meters": float(used_m) if used_m else 0,
                                             "tray_info_idx": tray_info_idx,
+                                            "profile_name": profile_names.get(slot_id),
                                             # Sliced output already pre-filtered by used_g>0,
                                             # so every entry that survives is in fact used by
                                             # this plate. Print-dispatch consumers ignore the
@@ -2534,14 +2546,16 @@ async def get_library_file_filament_requirements(
                             used_grams = 0
 
                         if used_grams > 0 and filament_id:
+                            slot_id = int(filament_id)
                             filaments.append(
                                 {
-                                    "slot_id": int(filament_id),
+                                    "slot_id": slot_id,
                                     "type": filament_type,
                                     "color": filament_color,
                                     "used_grams": round(used_grams, 1),
                                     "used_meters": float(used_m) if used_m else 0,
                                     "tray_info_idx": tray_info_idx,
+                                    "profile_name": profile_names.get(slot_id),
                                     "used_in_plate": True,
                                 }
                             )
@@ -2788,6 +2802,12 @@ async def _run_slicer_with_fallback(
     # — the sidecar will materialise the per-category JSONs from the
     # bundle's extracted directory at slice time.
     use_bundle = request.bundle is not None
+    is_3mf = model_filename.lower().endswith(".3mf")
+    if request.filament_mode == "embedded" and not is_3mf:
+        raise HTTPException(
+            status_code=400,
+            detail="Embedded filament mode is only available for 3MF sources.",
+        )
 
     user: User | None = None
     presets: dict[str, str] = {}
@@ -2810,9 +2830,10 @@ async def _run_slicer_with_fallback(
         # Multi-color: resolve each filament slot in plate order. The schema
         # validator backfilled `filament_presets` from the legacy `filament_preset`
         # field for single-color callers, so this list is always non-empty.
-        for ref in request.filament_presets:
-            assert ref is not None, "schema validator guarantees filament list is non-None"
-            filament_jsons.append(await resolve_preset_ref(db, user, ref, "filament"))
+        if request.filament_mode != "embedded":
+            for ref in request.filament_presets:
+                assert ref is not None, "schema validator guarantees filament list is non-None"
+                filament_jsons.append(await resolve_preset_ref(db, user, ref, "filament"))
 
     # Slicer routing — pick the sidecar URL by preferred_slicer.
     # The per-install URL setting (Settings UI → Slicer card) wins; an
@@ -2847,7 +2868,6 @@ async def _run_slicer_with_fallback(
     # Forwarding the original bytes lets --load-settings override the
     # specific fields the user changed (printer/process/filament) while
     # the embedded plate / model definitions remain intact.
-    is_3mf = model_filename.lower().endswith(".3mf")
     primary_bytes = model_bytes
     if is_3mf:
         # Strip "-1" inherit-from-parent sentinels from

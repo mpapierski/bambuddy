@@ -14,6 +14,8 @@ from pathlib import Path
 
 import defusedxml.ElementTree as ET
 
+from backend.app.utils.printer_models import normalize_device_kind
+
 logger = logging.getLogger(__name__)
 
 # Default filament properties
@@ -609,6 +611,25 @@ def inject_gcode_into_3mf(
         return None
 
 
+def _read_project_settings_from_3mf(zf: zipfile.ZipFile) -> dict:
+    if "Metadata/project_settings.config" not in zf.namelist():
+        return {}
+    try:
+        proj = json.loads(zf.read("Metadata/project_settings.config").decode())
+    except (ValueError, OSError):
+        return {}
+    return proj if isinstance(proj, dict) else {}
+
+
+def _strip_profile_prefix(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned.removeprefix("# ").strip() or None
+
+
 def extract_source_printer_model_from_3mf(zf: zipfile.ZipFile) -> str | None:
     """Source 3MF's bound printer model from ``Metadata/project_settings.config``.
 
@@ -619,13 +640,8 @@ def extract_source_printer_model_from_3mf(zf: zipfile.ZipFile) -> str | None:
     cross-printer slicing with rc=-16 and the result, when the strip + load
     fallback masks it, is a misleadingly-tagged archive.
     """
-    if "Metadata/project_settings.config" not in zf.namelist():
-        return None
-    try:
-        proj = json.loads(zf.read("Metadata/project_settings.config").decode())
-    except (ValueError, OSError):
-        return None
-    if not isinstance(proj, dict):
+    proj = _read_project_settings_from_3mf(zf)
+    if not proj:
         return None
     model = proj.get("printer_model")
     if isinstance(model, str) and model.strip():
@@ -641,6 +657,44 @@ def extract_source_printer_model_from_3mf(zf: zipfile.ZipFile) -> str | None:
     return None
 
 
+def extract_source_device_kind_from_3mf(zf: zipfile.ZipFile) -> str | None:
+    """Normalized device kind from a source 3MF's project settings."""
+    proj = _read_project_settings_from_3mf(zf)
+    if not proj:
+        return None
+    for key in ("printer_model", "printer_settings_id", "default_printer_profile"):
+        kind = normalize_device_kind(proj.get(key))
+        if kind:
+            return kind
+    return None
+
+
+def extract_source_process_profile_name_from_3mf(zf: zipfile.ZipFile) -> str | None:
+    """Process profile name embedded in a 3MF project, if present."""
+    proj = _read_project_settings_from_3mf(zf)
+    if not proj:
+        return None
+    for key in ("print_settings_id", "default_print_profile"):
+        value = _strip_profile_prefix(proj.get(key))
+        if value:
+            return value
+    return None
+
+
+def extract_project_filament_profile_names_from_3mf(zf: zipfile.ZipFile) -> dict[int, str]:
+    """Return slot-id -> filament profile name from project settings."""
+    proj = _read_project_settings_from_3mf(zf)
+    names = proj.get("filament_settings_id") or []
+    if not isinstance(names, list):
+        return {}
+    out: dict[int, str] = {}
+    for idx, value in enumerate(names):
+        cleaned = _strip_profile_prefix(value)
+        if cleaned:
+            out[idx + 1] = cleaned
+    return out
+
+
 def extract_project_filaments_from_3mf(zf: zipfile.ZipFile) -> list[dict]:
     """Project-wide AMS slot config from ``Metadata/project_settings.config``.
 
@@ -654,30 +708,34 @@ def extract_project_filaments_from_3mf(zf: zipfile.ZipFile) -> list[dict]:
     is empty until Bambu Studio has actually sliced the project, but the user
     can still pick filament profiles for a slice we're about to perform.
     """
-    if "Metadata/project_settings.config" not in zf.namelist():
+    proj = _read_project_settings_from_3mf(zf)
+    if not proj:
         return []
-    try:
-        proj = json.loads(zf.read("Metadata/project_settings.config").decode())
-    except (ValueError, OSError):
-        return []
-    if not isinstance(proj, dict):
-        return []
-    types_arr = proj.get("filament_type") or []
-    colors_arr = proj.get("filament_colour") or []
+    types_arr = proj.get("filament_type")
+    colors_arr = proj.get("filament_colour")
+    names_arr = proj.get("filament_settings_id")
+    types_arr = types_arr if isinstance(types_arr, list) else []
+    colors_arr = colors_arr if isinstance(colors_arr, list) else []
+    names_arr = names_arr if isinstance(names_arr, list) else []
     slot_count = max(
-        len(types_arr) if isinstance(types_arr, list) else 0, len(colors_arr) if isinstance(colors_arr, list) else 0
+        len(types_arr),
+        len(colors_arr),
+        len(names_arr),
     )
     out: list[dict] = []
     for i in range(slot_count):
-        out.append(
-            {
-                "slot_id": i + 1,
-                "type": types_arr[i] if i < len(types_arr) and isinstance(types_arr[i], str) else "",
-                "color": colors_arr[i] if i < len(colors_arr) and isinstance(colors_arr[i], str) else "",
-                "used_grams": 0,
-                "used_meters": 0,
-            }
-        )
+        item = {
+            "slot_id": i + 1,
+            "type": types_arr[i] if i < len(types_arr) and isinstance(types_arr[i], str) else "",
+            "color": colors_arr[i] if i < len(colors_arr) and isinstance(colors_arr[i], str) else "",
+            "used_grams": 0,
+            "used_meters": 0,
+        }
+        if i < len(names_arr):
+            name = _strip_profile_prefix(names_arr[i])
+            if name:
+                item["profile_name"] = name
+        out.append(item)
     return out
 
 

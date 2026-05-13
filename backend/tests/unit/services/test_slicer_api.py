@@ -254,6 +254,33 @@ class TestSliceWithProfiles:
         assert b"3mf" in body
 
     @pytest.mark.asyncio
+    async def test_embedded_filament_mode_omits_filament_parts_and_sends_all_plates(self):
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = request.content
+            return httpx.Response(
+                status_code=200,
+                content=b"3MF-BYTES",
+                headers={"x-print-time-seconds": "0", "x-filament-used-g": "0", "x-filament-used-mm": "0"},
+            )
+
+        service = SlicerApiService("http://sidecar:3000", client=_mock_client(handler))
+        await service.slice_with_profiles(
+            model_bytes=b"x",
+            model_filename="Project.3mf",
+            printer_profile_json="{}",
+            process_profile_json="{}",
+            filament_profile_jsons=[],
+            plate=0,
+        )
+
+        body = captured["body"]
+        assert b'name="plate"' in body
+        assert b"\r\n0\r\n" in body or b'name="plate"\r\n\r\n0' in body
+        assert b'name="filamentProfile"' not in body
+
+    @pytest.mark.asyncio
     async def test_multi_filament_sends_one_part_per_profile(self):
         # Multi-color slicing requires N filament profiles, in plate-slot
         # order, sent as N repeated multipart `filamentProfile` parts (NOT a

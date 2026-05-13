@@ -100,6 +100,49 @@ class TestDedupeByName:
         assert [p.name for p in l_["printer"]] == ["Custom"]
 
 
+class TestDeviceMetadata:
+    def test_infers_printer_device_kind_from_profile_name(self):
+        meta = sp._profile_device_metadata(slot="printer", name="Bambu Lab X1 Carbon 0.4 nozzle")
+        assert meta["device_kind"] == "X1C"
+        assert meta["compatible_device_kinds"] == ["X1C"]
+
+    def test_infers_process_compatible_devices_from_setting_lists(self):
+        meta = sp._profile_device_metadata(
+            slot="process",
+            name="0.20mm Standard @BBL",
+            setting={"print_compatible_printers": ["Bambu Lab A1", "Bambu Lab A1 mini"]},
+        )
+        assert meta["device_kind"] is None
+        assert meta["compatible_device_kinds"] == ["A1 mini", "A1"]
+
+    def test_compatible_printers_db_field_is_parsed(self):
+        meta = sp._profile_device_metadata(
+            slot="process",
+            name="Imported",
+            compatible_printers='["Bambu Lab P1S", "Bambu Lab P1P"]',
+        )
+        assert meta["compatible_device_kinds"] == ["P1S", "P1P"]
+
+    def test_available_device_kinds_uses_printer_and_process_slots(self):
+        tier = {
+            "printer": [
+                UnifiedPreset(id="p1", name="X1C", source="standard", device_kind="X1C"),
+            ],
+            "process": [
+                UnifiedPreset(
+                    id="proc",
+                    name="A1 process",
+                    source="standard",
+                    compatible_device_kinds=["A1", "A1 mini"],
+                ),
+            ],
+            "filament": [
+                UnifiedPreset(id="fil", name="PLA", source="standard", compatible_device_kinds=["H2D"]),
+            ],
+        }
+        assert sp._available_device_kinds(tier) == ["X1C", "A1 mini", "A1"]
+
+
 def _user_with_cloud_auth(user_id: int = 1) -> MagicMock:
     """Construct a mock User that passes the CLOUD_AUTH permission check.
 

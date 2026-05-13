@@ -4,6 +4,8 @@ export interface PlateFilament {
   color: string;
   used_grams: number;
   used_meters: number;
+  profile_name?: string | null;
+  tray_info_idx?: string | null;
   // True when this AMS slot is consumed by the picked plate. False
   // means the slot is configured project-wide but the picked plate
   // doesn't paint with it. Sliced 3MFs (.gcode.3mf) report only used
@@ -35,9 +37,10 @@ export interface ArchivePlatesResponse {
   has_gcode?: boolean;
   // Bound printer model from the source 3MF's project_settings.config (e.g.
   // "Bambu Lab A1"). Used by the SliceModal to warn before slicing if the
-  // user picks a profile for a different printer — the slicer CLI can't
-  // convert a 3MF across printer models.
+  // user picks a profile for a different printer.
   source_printer_model?: string | null;
+  source_device_kind?: string | null;
+  source_process_profile_name?: string | null;
 }
 
 export interface LibraryFilePlatesResponse {
@@ -46,6 +49,8 @@ export interface LibraryFilePlatesResponse {
   plates: PlateMetadata[];
   is_multi_plate: boolean;
   source_printer_model?: string | null;
+  source_device_kind?: string | null;
+  source_process_profile_name?: string | null;
 }
 
 export interface ViewerPlateSelectionState {

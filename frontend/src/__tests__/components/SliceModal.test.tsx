@@ -26,6 +26,7 @@ vi.mock('../../api/client', () => ({
     getArchivePlates: vi.fn(),
     getLibraryFileFilamentRequirements: vi.fn(),
     getArchiveFilamentRequirements: vi.fn(),
+    getPrinters: vi.fn(),
     listSlicerBundles: vi.fn(),
     getSettings: vi.fn().mockResolvedValue({}),
     updateSettings: vi.fn().mockResolvedValue({}),
@@ -41,6 +42,7 @@ const mockApi = api as unknown as {
   getArchivePlates: ReturnType<typeof vi.fn>;
   getLibraryFileFilamentRequirements: ReturnType<typeof vi.fn>;
   getArchiveFilamentRequirements: ReturnType<typeof vi.fn>;
+  getPrinters: ReturnType<typeof vi.fn>;
   listSlicerBundles: ReturnType<typeof vi.fn>;
 };
 
@@ -50,6 +52,7 @@ function makeUnified(overrides: Partial<UnifiedPresetsResponse> = {}): UnifiedPr
     local: { printer: [], process: [], filament: [] },
     standard: { printer: [], process: [], filament: [] },
     cloud_status: 'ok',
+    available_device_kinds: [],
     ...overrides,
   };
 }
@@ -121,6 +124,7 @@ describe('SliceModal', () => {
       plate_id: 1,
       filaments: [],
     });
+    mockApi.getPrinters.mockResolvedValue([]);
     // Default: no bundles imported. Bundle-tier tests override this with a
     // populated array; everything else inherits the empty default so the
     // modal renders the original (preset-only) layout.
@@ -235,6 +239,7 @@ describe('SliceModal', () => {
         process_preset: { source: 'local', id: '2' },
         filament_preset: { source: 'local', id: '3' },
         filament_presets: [{ source: 'local', id: '3' }],
+        filament_mode: 'override',
       });
     });
     await waitFor(() => expect(onClose).toHaveBeenCalled());
@@ -372,6 +377,120 @@ describe('SliceModal', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
+  function makeDeviceAwarePresets(): UnifiedPresetsResponse {
+    return makeUnified({
+      standard: {
+        printer: [
+          {
+            id: 'Bambu Lab X1 Carbon 0.4 nozzle',
+            name: 'Bambu Lab X1 Carbon 0.4 nozzle',
+            source: 'standard',
+            device_kind: 'X1C',
+            compatible_device_kinds: ['X1C'],
+          },
+          {
+            id: 'Bambu Lab A1 0.4 nozzle',
+            name: 'Bambu Lab A1 0.4 nozzle',
+            source: 'standard',
+            device_kind: 'A1',
+            compatible_device_kinds: ['A1'],
+          },
+        ],
+        process: [
+          {
+            id: '0.20mm Standard @BBL X1C',
+            name: '0.20mm Standard @BBL X1C',
+            source: 'standard',
+            compatible_device_kinds: ['X1C'],
+          },
+          {
+            id: '0.16mm Optimal @BBL A1',
+            name: '0.16mm Optimal @BBL A1',
+            source: 'standard',
+            compatible_device_kinds: ['A1'],
+          },
+        ],
+        filament: [{ id: 'Bambu PLA Basic', name: 'Bambu PLA Basic', source: 'standard' }],
+      },
+      available_device_kinds: ['X1C', 'A1'],
+    });
+  }
+
+  it('defaults the device and process from 3MF metadata, then filters profiles by device', async () => {
+    mockApi.getSlicerPresets.mockResolvedValue(makeDeviceAwarePresets());
+    mockApi.getLibraryFilePlates.mockResolvedValue({
+      file_id: 100,
+      filename: 'A1Project.3mf',
+      is_multi_plate: false,
+      source_device_kind: 'A1',
+      source_process_profile_name: '0.16mm Optimal @BBL A1',
+      plates: [],
+    });
+
+    renderWithTracker({
+      source: { kind: 'libraryFile', id: 100, filename: 'A1Project.3mf' },
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => expect(screen.getByText('Bambu Lab A1 0.4 nozzle')).toBeDefined());
+    await waitFor(() => {
+      expect((screen.getByRole('combobox', { name: /Device/i }) as HTMLSelectElement).value).toBe('A1');
+      expect((screen.getByRole('combobox', { name: /Printer profile/i }) as HTMLSelectElement).value)
+        .toBe('standard:Bambu Lab A1 0.4 nozzle');
+      expect((screen.getByRole('combobox', { name: /Process profile/i }) as HTMLSelectElement).value)
+        .toBe('standard:0.16mm Optimal @BBL A1');
+    });
+
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByRole('combobox', { name: /Device/i }), 'X1C');
+
+    await waitFor(() => {
+      expect((screen.getByRole('combobox', { name: /Printer profile/i }) as HTMLSelectElement).value)
+        .toBe('standard:Bambu Lab X1 Carbon 0.4 nozzle');
+      expect((screen.getByRole('combobox', { name: /Process profile/i }) as HTMLSelectElement).value)
+        .toBe('standard:0.20mm Standard @BBL X1C');
+    });
+  });
+
+  it('owned-only filters device kinds to configured printer models', async () => {
+    mockApi.getSlicerPresets.mockResolvedValue(makeDeviceAwarePresets());
+    mockApi.getPrinters.mockResolvedValue([
+      {
+        id: 1,
+        name: 'Shop X1C',
+        serial_number: 'SN',
+        ip_address: '192.0.2.1',
+        access_code: '',
+        model: 'Bambu Lab X1 Carbon',
+        location: null,
+        nozzle_count: 1,
+        is_active: true,
+        auto_archive: false,
+        external_camera_url: null,
+        external_camera_type: null,
+        external_camera_enabled: false,
+        external_camera_snapshot_url: null,
+        camera_rotation: 0,
+        plate_detection_enabled: false,
+        created_at: '',
+        updated_at: '',
+      },
+    ]);
+
+    renderWithTracker({
+      source: { kind: 'libraryFile', id: 100, filename: 'Cube.stl' },
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => expect(screen.getByRole('combobox', { name: /Device/i })).toBeDefined());
+    const user = userEvent.setup();
+    await user.click(screen.getByLabelText(/Owned device kinds only/i));
+
+    const deviceSelect = screen.getByRole('combobox', { name: /Device/i }) as HTMLSelectElement;
+    await waitFor(() => expect(deviceSelect.value).toBe('X1C'));
+    expect([...deviceSelect.options].map((o) => o.value)).toEqual(['X1C']);
+  });
+
   // ----- Multi-plate flow -----------------------------------------------
 
   function makeMultiPlateLibraryResponse() {
@@ -406,23 +525,21 @@ describe('SliceModal', () => {
     };
   }
 
-  it('shows the plate picker first for multi-plate library files', async () => {
+  it('shows plate selection inline for multi-plate library files', async () => {
     mockApi.getLibraryFilePlates.mockResolvedValue(makeMultiPlateLibraryResponse());
     renderWithTracker({
       source: { kind: 'libraryFile', id: 100, filename: 'Multi.3mf' },
       onClose: vi.fn(),
     });
 
-    // Plate picker renders one button per plate — the accessible name
-    // joins the heading ("Plate N — name") with the object summary line.
-    await screen.findByRole('button', { name: /Plate 1.*Cube/ });
-    expect(screen.getByRole('button', { name: /Plate 2.*Pyramid/ })).toBeDefined();
-    // Profile dropdowns must NOT be visible yet — the user has to pick a
-    // plate first.
-    expect(screen.queryByRole('combobox')).toBeNull();
+    await waitFor(() => expect(screen.getByText('My Custom X1C')).toBeDefined());
+    const plateSelect = screen.getByRole('combobox', { name: /Plate/i }) as HTMLSelectElement;
+    expect(plateSelect.value).toBe('0');
+    expect(within(plateSelect).getByText('All plates')).toBeDefined();
+    expect(within(plateSelect).getByText(/Plate 2.*Plate 2/)).toBeDefined();
   });
 
-  it('skips the plate picker for single-plate sources', async () => {
+  it('skips the plate selector for single-plate sources', async () => {
     mockApi.getLibraryFilePlates.mockResolvedValue({
       file_id: 100,
       filename: 'Single.3mf',
@@ -445,8 +562,8 @@ describe('SliceModal', () => {
       onClose: vi.fn(),
     });
 
-    // Should jump straight to the profile dropdowns.
     await waitFor(() => expect(screen.getByText('My Custom X1C')).toBeDefined());
+    expect(screen.queryByRole('combobox', { name: /Plate/i })).toBeNull();
   });
 
   it('passes the picked plate to the slice request', async () => {
@@ -463,14 +580,9 @@ describe('SliceModal', () => {
     });
 
     const user = userEvent.setup();
-    // Step 1: pick Plate 2.
-    const plate2Button = await screen.findByRole('button', { name: /Plate 2.*Pyramid/ });
-    await user.click(plate2Button);
-
-    // Step 2: profile dropdowns are now visible.
     await waitFor(() => expect(screen.getByText('My Custom X1C')).toBeDefined());
+    await user.selectOptions(screen.getByRole('combobox', { name: /Plate/i }), '2');
 
-    // Step 3: submit and verify the plate index made it into the body.
     await user.click(screen.getByRole('button', { name: /^Slice$/ }));
     await waitFor(() => {
       expect(mockApi.sliceLibraryFile).toHaveBeenCalledWith(
@@ -491,12 +603,12 @@ describe('SliceModal', () => {
       onClose: vi.fn(),
     });
 
-    await screen.findByRole('button', { name: /Plate 1.*Cube/ });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: /Plate/i })).toBeDefined());
     expect(mockApi.getArchivePlates).toHaveBeenCalledWith(100);
     expect(mockApi.getLibraryFilePlates).not.toHaveBeenCalled();
   });
 
-  it('cancelling the plate picker closes the entire slice flow', async () => {
+  it('cancelling the slice modal closes the entire slice flow', async () => {
     const onClose = vi.fn();
     mockApi.getLibraryFilePlates.mockResolvedValue(makeMultiPlateLibraryResponse());
     renderWithTracker({
@@ -504,12 +616,37 @@ describe('SliceModal', () => {
       onClose,
     });
 
-    await screen.findByRole('button', { name: /Plate 1.*Cube/ });
+    await waitFor(() => expect(screen.getByText('My Custom X1C')).toBeDefined());
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /^Close$/i }));
 
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('submits all plates as plate 0 by default', async () => {
+    mockApi.getLibraryFilePlates.mockResolvedValue(makeMultiPlateLibraryResponse());
+    mockApi.sliceLibraryFile.mockResolvedValue({
+      job_id: 42,
+      status: 'pending',
+      status_url: '/api/v1/slice-jobs/42',
+    });
+
+    renderWithTracker({
+      source: { kind: 'libraryFile', id: 100, filename: 'Multi.3mf' },
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => expect(screen.getByText('My Custom X1C')).toBeDefined());
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /^Slice$/ }));
+
+    await waitFor(() => {
+      expect(mockApi.sliceLibraryFile).toHaveBeenCalledWith(
+        100,
+        expect.objectContaining({ plate: 0 }),
+      );
+    });
   });
 
   it('omits the plate field when the source is single-plate', async () => {
@@ -589,10 +726,11 @@ describe('SliceModal', () => {
       local: { printer: [], process: [], filament: [] },
       standard: { printer: [], process: [], filament: [] },
       cloud_status: 'ok',
+      available_device_kinds: [],
     };
   }
 
-  it('renders one filament dropdown per plate slot when the source is multi-color', async () => {
+  it('renders embedded filament rows by default when the source is multi-color', async () => {
     mockApi.getLibraryFilePlates.mockResolvedValue(makeMultiColorPlateResponse());
     mockApi.getLibraryFileFilamentRequirements.mockResolvedValue(makeMultiColorRequirementsResponse());
     mockApi.getSlicerPresets.mockResolvedValue(makeColorAwarePresets());
@@ -603,8 +741,12 @@ describe('SliceModal', () => {
     });
 
     await waitFor(() => expect(screen.getByText('X1C')).toBeDefined());
-    // 1 printer + 1 process + 2 filament = 4 dropdowns.
-    expect(screen.getAllByRole('combobox')).toHaveLength(4);
+    expect(screen.getByText('3MF filament profiles')).toBeDefined();
+    expect(screen.getByText(/Filament 1/)).toBeDefined();
+    expect(screen.getByText(/Filament 2/)).toBeDefined();
+    // Default path keeps filaments embedded, so only printer + process
+    // dropdowns render until Advanced override is enabled.
+    expect(screen.getAllByRole('combobox')).toHaveLength(2);
   });
 
   it('pre-picks each filament slot by matching colour metadata', async () => {
@@ -625,6 +767,8 @@ describe('SliceModal', () => {
     await waitFor(() => expect(screen.getByText('X1C')).toBeDefined());
 
     const user = userEvent.setup();
+    await user.click(screen.getByText('Advanced'));
+    await user.click(screen.getByRole('button', { name: /Override filament profiles/i }));
     await user.click(screen.getByRole('button', { name: /^Slice$/ }));
 
     await waitFor(() => {
@@ -636,6 +780,33 @@ describe('SliceModal', () => {
         { source: 'cloud', id: 'F-BLACK' },
         { source: 'cloud', id: 'F-WHITE' },
       ]);
+    });
+  });
+
+  it('uses embedded 3MF filament profiles by default', async () => {
+    mockApi.getLibraryFilePlates.mockResolvedValue(makeMultiColorPlateResponse());
+    mockApi.getLibraryFileFilamentRequirements.mockResolvedValue(makeMultiColorRequirementsResponse());
+    mockApi.getSlicerPresets.mockResolvedValue(makeColorAwarePresets());
+    mockApi.sliceLibraryFile.mockResolvedValue({
+      job_id: 42,
+      status: 'pending',
+      status_url: '/api/v1/slice-jobs/42',
+    });
+
+    renderWithTracker({
+      source: { kind: 'libraryFile', id: 100, filename: 'TwoColor.3mf' },
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => expect(screen.getByText('X1C')).toBeDefined());
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /^Slice$/ }));
+
+    await waitFor(() => {
+      const [, body] = mockApi.sliceLibraryFile.mock.calls[0];
+      expect(body.filament_mode).toBe('embedded');
+      expect(body.filament_preset).toBeUndefined();
+      expect(body.filament_presets).toBeUndefined();
     });
   });
 
@@ -685,6 +856,8 @@ describe('SliceModal', () => {
     await waitFor(() => expect(screen.getByText('X1C')).toBeDefined());
 
     const user = userEvent.setup();
+    await user.click(screen.getByText('Advanced'));
+    await user.click(screen.getByRole('button', { name: /Override filament profiles/i }));
     const selects = screen.getAllByRole('combobox') as HTMLSelectElement[];
     // Slots 0 (printer) and 1 (process) are auto-picked. Slots 2 and 3 are
     // the two filament dropdowns. Swap slot-2 (was black) to white.
@@ -699,13 +872,10 @@ describe('SliceModal', () => {
     });
   });
 
-  // Pre-slice printer-mismatch warning. The slicer CLI cannot re-slice a
-  // 3MF for a different printer model — clicking Slice in that state
-  // would silently fall back to the embedded settings and produce a
-  // wrong-printer file. The modal surfaces a warning and disables Slice
-  // when the source's source_printer_model doesn't match the picked
-  // printer profile.
-  it('shows a printer-mismatch warning and disables Slice when models differ', async () => {
+  // Pre-slice printer-mismatch warning. Cross-device 3MF conversion is
+  // attempted through --load-settings now, but the modal still surfaces a
+  // warning so users understand why a slice may fail.
+  it('shows a printer-mismatch warning while keeping Slice enabled when models differ', async () => {
     mockApi.getLibraryFilePlates.mockResolvedValue({
       file_id: 100,
       filename: 'A1Original.3mf',
@@ -747,9 +917,8 @@ describe('SliceModal', () => {
     expect(alert.textContent).toMatch(/A1/);
     expect(alert.textContent).toMatch(/X1 Carbon/);
 
-    // Slice button is disabled while the warning is up.
     const sliceButton = screen.getByRole('button', { name: /^Slice$/ }) as HTMLButtonElement;
-    expect(sliceButton.disabled).toBe(true);
+    expect(sliceButton.disabled).toBe(false);
   });
 
   it('keeps Slice enabled when the picked profile matches the source printer model', async () => {
@@ -875,6 +1044,7 @@ describe('SliceModal', () => {
       local: { printer: [], process: [], filament: [] },
       standard: { printer: [], process: [], filament: [] },
       cloud_status: 'ok',
+      available_device_kinds: [],
     });
 
     renderWithTracker({
@@ -883,6 +1053,10 @@ describe('SliceModal', () => {
     });
 
     await waitFor(() => expect(screen.getByText('X1C')).toBeDefined());
+
+    const user = userEvent.setup();
+    await user.click(screen.getByText('Advanced'));
+    await user.click(screen.getByRole('button', { name: /Override filament profiles/i }));
 
     // Both filament rows render — 1 printer + 1 process + 2 filament = 4.
     const selects = screen.getAllByRole('combobox') as HTMLSelectElement[];
@@ -937,6 +1111,7 @@ describe('SliceModal', () => {
       local: { printer: [], process: [], filament: [] },
       standard: { printer: [], process: [], filament: [] },
       cloud_status: 'ok',
+      available_device_kinds: [],
     });
     mockApi.sliceLibraryFile.mockResolvedValue({
       job_id: 50,
@@ -952,6 +1127,8 @@ describe('SliceModal', () => {
     await waitFor(() => expect(screen.getByText('X1C')).toBeDefined());
 
     const user = userEvent.setup();
+    await user.click(screen.getByText('Advanced'));
+    await user.click(screen.getByRole('button', { name: /Override filament profiles/i }));
     await user.click(screen.getByRole('button', { name: /^Slice$/ }));
 
     await waitFor(() => {

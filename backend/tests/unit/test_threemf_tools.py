@@ -12,7 +12,10 @@ import zipfile
 from backend.app.utils.threemf_tools import (
     extract_filament_usage_from_3mf,
     extract_plate_extruder_set_from_3mf,
+    extract_project_filament_profile_names_from_3mf,
     extract_project_filaments_from_3mf,
+    extract_source_device_kind_from_3mf,
+    extract_source_process_profile_name_from_3mf,
     extract_source_printer_model_from_3mf,
     get_cumulative_usage_at_layer,
     mm_to_grams,
@@ -441,13 +444,24 @@ class TestExtractProjectFilamentsFrom3mf:
         proj = {
             "filament_type": ["PLA", "PETG"],
             "filament_colour": ["#000000", "#FFFFFF"],
+            "filament_settings_id": ["# Bambu PLA Basic @BBL X1C", "# Bambu PETG HF @BBL X1C"],
         }
         with _make_3mf_with({"Metadata/project_settings.config": json.dumps(proj)}) as zf:
             out = extract_project_filaments_from_3mf(zf)
-        assert [(f["slot_id"], f["type"], f["color"]) for f in out] == [
-            (1, "PLA", "#000000"),
-            (2, "PETG", "#FFFFFF"),
+        assert [(f["slot_id"], f["type"], f["color"], f["profile_name"]) for f in out] == [
+            (1, "PLA", "#000000", "Bambu PLA Basic @BBL X1C"),
+            (2, "PETG", "#FFFFFF", "Bambu PETG HF @BBL X1C"),
         ]
+
+    def test_extracts_project_filament_profile_names(self):
+        proj = {
+            "filament_settings_id": ["# Bambu PLA Basic @BBL X1C", "", "# Bambu PETG HF @BBL X1C"],
+        }
+        with _make_3mf_with({"Metadata/project_settings.config": json.dumps(proj)}) as zf:
+            assert extract_project_filament_profile_names_from_3mf(zf) == {
+                1: "Bambu PLA Basic @BBL X1C",
+                3: "Bambu PETG HF @BBL X1C",
+            }
 
     def test_mismatched_array_lengths_use_max_with_blanks(self):
         proj = {
@@ -686,3 +700,28 @@ class TestExtractSourcePrinterModelFrom3mf:
         proj = {"printer_model": "", "printer_settings_id": ""}
         with _make_3mf_with({"Metadata/project_settings.config": json.dumps(proj)}) as zf:
             assert extract_source_printer_model_from_3mf(zf) is None
+
+
+class TestExtractSourceDeviceAndProcessFrom3mf:
+    def test_normalizes_source_device_kind_from_printer_model(self):
+        proj = {"printer_model": "Bambu Lab X1 Carbon"}
+        with _make_3mf_with({"Metadata/project_settings.config": json.dumps(proj)}) as zf:
+            assert extract_source_device_kind_from_3mf(zf) == "X1C"
+
+    def test_normalizes_source_device_kind_from_printer_settings_id(self):
+        proj = {"printer_settings_id": "# Bambu Lab A1 mini 0.4 nozzle"}
+        with _make_3mf_with({"Metadata/project_settings.config": json.dumps(proj)}) as zf:
+            assert extract_source_device_kind_from_3mf(zf) == "A1 mini"
+
+    def test_reads_print_settings_id_before_default_print_profile(self):
+        proj = {
+            "print_settings_id": "# 0.16mm Optimal @BBL X1C",
+            "default_print_profile": "# 0.20mm Standard @BBL X1C",
+        }
+        with _make_3mf_with({"Metadata/project_settings.config": json.dumps(proj)}) as zf:
+            assert extract_source_process_profile_name_from_3mf(zf) == "0.16mm Optimal @BBL X1C"
+
+    def test_process_profile_falls_back_to_default_print_profile(self):
+        proj = {"default_print_profile": "# 0.20mm Standard @BBL A1"}
+        with _make_3mf_with({"Metadata/project_settings.config": json.dumps(proj)}) as zf:
+            assert extract_source_process_profile_name_from_3mf(zf) == "0.20mm Standard @BBL A1"

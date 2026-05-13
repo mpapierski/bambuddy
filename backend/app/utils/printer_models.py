@@ -4,6 +4,8 @@ Converts 3MF printer model names (e.g., "Bambu Lab X1 Carbon") to
 normalized short names (e.g., "X1C") that match database storage.
 """
 
+import re
+
 # Map from 3MF printer_model strings to normalized short names
 PRINTER_MODEL_MAP = {
     "Bambu Lab X1 Carbon": "X1C",
@@ -50,6 +52,42 @@ PRINTER_MODEL_ID_MAP = {
     "O1C2": "H2C",
     "O1S": "H2S",
 }
+
+DEVICE_KIND_ORDER = (
+    "X1C",
+    "X1",
+    "X1E",
+    "P1S",
+    "P1P",
+    "P2S",
+    "A1",
+    "A1 Mini",
+    "H2D",
+    "H2D Pro",
+    "H2C",
+    "H2S",
+    "X2D",
+)
+
+_DEVICE_KIND_SORT = {name: idx for idx, name in enumerate(DEVICE_KIND_ORDER)}
+
+# Keep longer / more specific aliases first so "A1 Mini" wins before "A1",
+# and "X1 Carbon" wins before the generic "X1" token.
+_DEVICE_ALIASES = (
+    ("H2D Pro", ("H2DPRO", "H2D-PRO", "O1E", "O2D")),
+    ("A1 Mini", ("A1MINI", "A1-MINI", "A1 MINI", "N2S", "A12", "A04")),
+    ("X1C", ("X1CARBON", "X1 CARBON", "X1C", "C11")),
+    ("X1E", ("X1E", "C13")),
+    ("X2D", ("X2D", "N6")),
+    ("H2C", ("H2C", "O1C2", "O1C")),
+    ("H2S", ("H2S", "O1S")),
+    ("H2D", ("H2D", "O1D")),
+    ("P2S", ("P2S", "N7")),
+    ("P1S", ("P1S",)),
+    ("P1P", ("P1P",)),
+    ("A1", ("A1", "N1", "A11")),
+    ("X1", ("X1", "C12")),
+)
 
 
 # Rod/rail type classification for maintenance tasks.
@@ -207,3 +245,53 @@ def normalize_printer_model(raw_model: str | None) -> str | None:
     # Strip "Bambu Lab " prefix for unknown models
     stripped = raw_model.replace("Bambu Lab ", "").strip()
     return stripped or None
+
+
+def _compact_model_token(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", value.upper())
+
+
+def normalize_device_kind(raw_model: object) -> str | None:
+    """Best-effort normalization to Bambuddy's short device kind.
+
+    Unlike :func:`normalize_printer_model`, this accepts free-form preset
+    names such as ``"0.20mm Standard @BBL X1C"`` or
+    ``"Bambu Lab X1 Carbon 0.4 nozzle"`` and extracts the device token.
+    """
+    if not isinstance(raw_model, str) or not raw_model:
+        return None
+
+    direct = normalize_printer_model_id(raw_model)
+    if direct in _DEVICE_KIND_SORT:
+        return direct
+
+    direct = normalize_printer_model(raw_model)
+    if direct in _DEVICE_KIND_SORT:
+        return direct
+
+    compact = _compact_model_token(raw_model)
+    if not compact:
+        return None
+
+    for canonical, aliases in _DEVICE_ALIASES:
+        for alias in aliases:
+            if _compact_model_token(alias) in compact:
+                return canonical
+    return None
+
+
+def infer_device_kinds_from_strings(values: list[str | None] | tuple[str | None, ...]) -> list[str]:
+    """Return unique normalized device kinds found in free-form strings."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        kind = normalize_device_kind(value)
+        if kind and kind not in seen:
+            seen.add(kind)
+            out.append(kind)
+    return sort_device_kinds(out)
+
+
+def sort_device_kinds(values: list[str] | set[str] | tuple[str, ...]) -> list[str]:
+    """Stable user-facing sort for device kind selectors."""
+    return sorted(set(values), key=lambda v: (_DEVICE_KIND_SORT.get(v, 10_000), v))
