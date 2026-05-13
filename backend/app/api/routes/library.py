@@ -2870,6 +2870,46 @@ def _profile_compatible_printers(*profiles: dict) -> list[str]:
     return out
 
 
+def _append_unique_profile_text(values: list[str], value: object) -> None:
+    cleaned = _clean_profile_text(value)
+    if cleaned and cleaned not in values:
+        values.append(cleaned)
+
+
+def _printer_profile_compatibility_names(profile_json: str | None, fallback_name: str | None = None) -> list[str]:
+    profile = _parse_profile_json(profile_json)
+    out: list[str] = []
+    for key in ("inherits", "printer_settings_id", "name", "default_printer_profile", "printer_model"):
+        _append_unique_profile_text(out, profile.get(key))
+    _append_unique_profile_text(out, fallback_name)
+    for value in list(out):
+        _append_unique_profile_text(out, _strip_nozzle_suffix(value))
+    return out
+
+
+def _ensure_process_profile_compatible_with_printer(
+    process_profile_json: str,
+    printer_profile_json: str | None,
+    *,
+    printer_name: str | None = None,
+) -> str:
+    process_profile = _parse_profile_json(process_profile_json)
+    if not process_profile:
+        return process_profile_json
+
+    compatible = _profile_string_list(process_profile.get("compatible_printers"))
+    changed = False
+    for candidate in _printer_profile_compatibility_names(printer_profile_json, printer_name):
+        if candidate not in compatible:
+            compatible.append(candidate)
+            changed = True
+
+    if not changed:
+        return process_profile_json
+    process_profile["compatible_printers"] = compatible
+    return json.dumps(process_profile)
+
+
 def _strip_nozzle_suffix(profile_name: str | None) -> str | None:
     name = _clean_profile_text(profile_name)
     if not name:
@@ -3027,6 +3067,10 @@ async def _run_slicer_with_fallback(
         for slot, ref in refs.items():
             assert ref is not None, "schema validator guarantees PresetRef is set"
             presets[slot] = await resolve_preset_ref(db, user, ref, slot)
+        presets["process"] = _ensure_process_profile_compatible_with_printer(
+            presets["process"],
+            presets["printer"],
+        )
         # Multi-color: resolve each filament slot in plate order. The schema
         # validator backfilled `filament_presets` from the legacy `filament_preset`
         # field for single-color callers, so this list is always non-empty.

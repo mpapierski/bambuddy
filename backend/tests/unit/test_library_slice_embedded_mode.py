@@ -11,7 +11,11 @@ import pytest
 from fastapi import HTTPException
 
 from backend.app.api.routes import settings as settings_route
-from backend.app.api.routes.library import _infer_device_kind_from_profile_json, _run_slicer_with_fallback
+from backend.app.api.routes.library import (
+    _ensure_process_profile_compatible_with_printer,
+    _infer_device_kind_from_profile_json,
+    _run_slicer_with_fallback,
+)
 from backend.app.schemas.slicer import PresetRef, SliceRequest
 from backend.app.services import preset_resolver
 from backend.app.services import slicer_api as slicer_api_module
@@ -36,6 +40,24 @@ def test_infers_device_kind_from_profile_json_fields():
         == "A1 Mini"
     )
     assert _infer_device_kind_from_profile_json("Bambu Lab P1S 0.4 nozzle") == "P1S"
+
+
+def test_augments_process_profile_with_selected_printer_compatibility():
+    updated = _ensure_process_profile_compatible_with_printer(
+        json.dumps({"name": "0.20mm Standard @BBL X1C", "type": "process"}),
+        json.dumps(
+            {
+                "name": "Bambu Lab X1 Carbon 0.4 nozzle",
+                "inherits": "Bambu Lab X1 Carbon 0.4 nozzle",
+                "printer_model": "Bambu Lab X1 Carbon",
+                "type": "machine",
+            }
+        ),
+    )
+
+    compatible = json.loads(updated)["compatible_printers"]
+    assert "Bambu Lab X1 Carbon 0.4 nozzle" in compatible
+    assert "Bambu Lab X1 Carbon" in compatible
 
 
 @pytest.mark.asyncio
