@@ -8,10 +8,22 @@ interface PlatePickerModalProps {
   plates: PlateMetadata[];
   onSelect: (plateIndex: number) => void;
   onClose: () => void;
+  includeAll?: boolean;
+  title?: string;
+  hint?: string | null;
 }
 
-export function PlatePickerModal({ plates, onSelect, onClose }: PlatePickerModalProps) {
+export function PlatePickerModal({
+  plates,
+  onSelect,
+  onClose,
+  includeAll = false,
+  title,
+  hint,
+}: PlatePickerModalProps) {
   const { t } = useTranslation();
+  const resolvedTitle = title ?? t('archives.platePicker.title');
+  const resolvedHint = hint === undefined ? t('archives.platePicker.hint') : hint;
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
@@ -24,8 +36,8 @@ export function PlatePickerModal({ plates, onSelect, onClose }: PlatePickerModal
         {/* Header */}
         <div className="flex-shrink-0 flex items-start justify-between gap-3 px-4 pt-4 pb-3 border-b border-bambu-dark-tertiary/40">
           <div className="min-w-0">
-            <h3 className="text-white font-medium">{t('archives.platePicker.title')}</h3>
-            <p className="text-xs text-bambu-gray mt-1">{t('archives.platePicker.hint')}</p>
+            <h3 className="text-white font-medium">{resolvedTitle}</h3>
+            {resolvedHint != null && <p className="text-xs text-bambu-gray mt-1">{resolvedHint}</p>}
           </div>
           <button
             onClick={onClose}
@@ -38,6 +50,25 @@ export function PlatePickerModal({ plates, onSelect, onClose }: PlatePickerModal
         {/* Grid */}
         <div className="flex-1 overflow-y-auto p-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {includeAll && (
+              <button
+                type="button"
+                onClick={() => onSelect(0)}
+                className="flex items-center gap-2 p-2 rounded-lg border border-bambu-dark-tertiary bg-bambu-dark hover:border-bambu-gray transition-colors text-left"
+              >
+                <div className="w-12 h-12 rounded bg-bambu-dark-tertiary flex items-center justify-center flex-shrink-0">
+                  <Layers className="w-5 h-5 text-bambu-gray" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-white font-medium truncate">
+                    {t('slice.allPlates', 'All plates')}
+                  </p>
+                  <p className="text-xs text-bambu-gray truncate">
+                    {t('slice.allPlatesHint', 'Slice every plate in this 3MF')}
+                  </p>
+                </div>
+              </button>
+            )}
             {plates.map((plate) => (
               <button
                 key={plate.index}

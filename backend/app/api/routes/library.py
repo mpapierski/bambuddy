@@ -12,6 +12,7 @@ import shutil
 import uuid
 import zipfile
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
@@ -63,6 +64,7 @@ from backend.app.schemas.library import (
 from backend.app.schemas.slicer import SliceRequest, SliceResponse
 from backend.app.services.archive import ThreeMFParser
 from backend.app.services.stl_thumbnail import generate_stl_thumbnail
+from backend.app.utils.printer_models import normalize_device_kind
 from backend.app.utils.threemf_tools import (
     extract_nozzle_mapping_from_3mf,
     extract_project_filaments_from_3mf,
@@ -2762,6 +2764,61 @@ def _sanitize_project_settings_sentinels(zip_bytes: bytes) -> bytes:
         return zip_bytes
 
 
+def _infer_device_kind_from_profile_json(profile_json: str | None) -> str | None:
+    """Infer a target device kind from a printer profile JSON blob.
+
+    Standard-tier stubs, local imports, and cloud profiles do not all expose
+    the same fields, so this accepts both structured JSON and the raw name as
+    a final fallback.
+    """
+    if not profile_json:
+        return None
+    try:
+        data = json.loads(profile_json)
+    except (TypeError, ValueError):
+        return normalize_device_kind(profile_json)
+    if not isinstance(data, dict):
+        return None
+
+    def infer_from_value(value: object) -> str | None:
+        kind = normalize_device_kind(value)
+        if kind:
+            return kind
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                kind = infer_from_value(item)
+                if kind:
+                    return kind
+        return None
+
+    for key in (
+        "printer_model",
+        "printer_settings_id",
+        "print_compatible_printers",
+        "compatible_printers",
+        "default_printer_profile",
+        "name",
+        "inherits",
+    ):
+        kind = infer_from_value(data.get(key))
+        if kind:
+            return kind
+
+    for value in data.values():
+        kind = infer_from_value(value)
+        if kind:
+            return kind
+    return None
+
+
+def _extract_source_device_kind_from_3mf_bytes(model_bytes: bytes) -> str | None:
+    try:
+        with zipfile.ZipFile(BytesIO(model_bytes), "r") as zf:
+            return extract_source_device_kind_from_3mf(zf)
+    except (zipfile.BadZipFile, OSError):
+        return None
+
+
 async def _run_slicer_with_fallback(
     db: AsyncSession,
     *,
@@ -2852,6 +2909,17 @@ async def _run_slicer_with_fallback(
             detail=f"Unknown preferred_slicer setting: '{preferred}'. Expected 'orcaslicer' or 'bambu_studio'.",
         )
 
+    source_device_kind = _extract_source_device_kind_from_3mf_bytes(model_bytes) if is_3mf else None
+    if use_bundle:
+        target_device_kind = normalize_device_kind(request.bundle.printer_name if request.bundle else None)
+    else:
+        target_device_kind = _infer_device_kind_from_profile_json(presets.get("printer"))
+    cross_device_profile_slice = (
+        source_device_kind is not None
+        and target_device_kind is not None
+        and source_device_kind != target_device_kind
+    )
+
     # Note: an earlier version of this code stripped Metadata/project_settings.
     # config + model_settings.config + slice_info.config + cut_information.xml
     # before forwarding the 3MF, the theory being that --load-settings would
@@ -2930,6 +2998,15 @@ async def _run_slicer_with_fallback(
                 )
         except SlicerApiServerError as exc:
             if not is_3mf:
+                raise
+            if cross_device_profile_slice:
+                logger.warning(
+                    "Slicer CLI rejected cross-device profile slice for %s (%s -> %s); "
+                    "not falling back to embedded source settings",
+                    model_filename,
+                    source_device_kind,
+                    target_device_kind,
+                )
                 raise
             logger.warning(
                 "Slicer CLI rejected --load-settings for %s (%s); retrying with embedded settings",
@@ -3179,7 +3256,7 @@ async def slice_and_persist_as_archive(
         filament_color=new_filament_color,
         layer_height=source_archive.layer_height,
         nozzle_diameter=source_archive.nozzle_diameter,
-        sliced_for_model=source_archive.sliced_for_model,
+        sliced_for_model=parsed_metadata.get("sliced_for_model") or source_archive.sliced_for_model,
         makerworld_url=source_archive.makerworld_url,
         designer=source_archive.designer,
         # Sliced-but-not-printed: keep status default ("completed") so it

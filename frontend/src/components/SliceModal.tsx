@@ -17,6 +17,7 @@ import {
 } from '../api/client';
 import { useSliceJobTracker } from '../contexts/SliceJobTrackerContext';
 import { useToast } from '../contexts/ToastContext';
+import { PlatePickerModal } from './PlatePickerModal';
 import type { PlateFilament } from '../types/plates';
 import { normalizeColorForCompare, colorsAreSimilar } from '../utils/amsHelpers';
 
@@ -402,14 +403,9 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
 
   const isMultiPlate =
     !!platesQuery.data?.is_multi_plate && (platesQuery.data?.plates?.length ?? 0) > 1;
+  const needsPlatePicker = isMultiPlate && selectedPlate == null;
   const sourceDeviceKind =
     platesQuery.data?.source_device_kind ?? normalizeDeviceKind(platesQuery.data?.source_printer_model);
-
-  useEffect(() => {
-    if (isMultiPlate && selectedPlate == null) {
-      setSelectedPlate(0);
-    }
-  }, [isMultiPlate, selectedPlate]);
 
   useEffect(() => {
     setFilamentMode(sourceIs3mf ? 'embedded' : 'override');
@@ -452,7 +448,7 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
       }
       return api.getArchiveFilamentRequirements(source.id, effectivePlateId, previewRequestId);
     },
-    enabled: !platesQuery.isLoading,
+    enabled: !platesQuery.isLoading && !needsPlatePicker,
     staleTime: 60_000,
   });
 
@@ -471,7 +467,7 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
     queryKey: ['slicerPresets'],
     queryFn: () => api.getSlicerPresets(),
     staleTime: 60_000,
-    enabled: !platesQuery.isLoading,
+    enabled: !platesQuery.isLoading && !needsPlatePicker,
   });
 
   // Imported Printer Preset Bundles (.bbscfg). Empty list when no sidecar
@@ -481,7 +477,7 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
     queryKey: ['slicerBundles'],
     queryFn: api.listSlicerBundles,
     staleTime: 60_000,
-    enabled: !platesQuery.isLoading,
+    enabled: !platesQuery.isLoading && !needsPlatePicker,
     // Bundle listing is a hard 503 when the sidecar is offline; don't
     // retry tight loops in that case.
     retry: false,
@@ -711,6 +707,19 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
       : t('archives.platePicker.plateLabel', { index: selectedPlate });
   }, [platesQuery.data?.plates, selectedPlate, t]);
 
+  if (needsPlatePicker && platesQuery.data) {
+    return (
+      <PlatePickerModal
+        plates={platesQuery.data.plates}
+        includeAll
+        title={t('slice.selectPlate', 'Select plate to slice')}
+        hint={t('slice.selectPlateHint', 'Pick a plate to slice, or choose All plates.')}
+        onSelect={(plateIndex) => setSelectedPlate(plateIndex)}
+        onClose={onClose}
+      />
+    );
+  }
+
   // Main slicing form. While the plates query is in-flight we still render
   // the shell because the presets query is gated on it; the loader covers both.
   return (
@@ -806,28 +815,6 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
                     {t('slice.ownedDeviceKindsOnly', 'Owned device kinds only')}
                   </label>
                 </div>
-              )}
-              {isMultiPlate && (
-                <label className="block">
-                  <span className="block text-sm text-bambu-gray mb-1">
-                    {t('slice.plate', 'Plate')}
-                  </span>
-                  <select
-                    value={selectedPlate ?? 0}
-                    onChange={(e) => setSelectedPlate(Number(e.target.value))}
-                    disabled={isEnqueuing}
-                    className="w-full px-3 py-2 rounded-md bg-bambu-dark border border-bambu-dark-tertiary text-white text-sm focus:outline-none focus:border-bambu-gray disabled:opacity-50"
-                  >
-                    <option value={0}>{t('slice.allPlates', 'All plates')}</option>
-                    {(platesQuery.data?.plates ?? []).map((plate) => (
-                      <option key={plate.index} value={plate.index}>
-                        {plate.name
-                          ? `${t('archives.platePicker.plateLabel', { index: plate.index })} — ${plate.name}`
-                          : t('archives.platePicker.plateLabel', { index: plate.index })}
-                      </option>
-                    ))}
-                  </select>
-                </label>
               )}
               {/* Bundle picker — only renders when at least one .bbscfg has
                   been imported via Settings → Slicer Bundles. Lets the user

@@ -525,18 +525,17 @@ describe('SliceModal', () => {
     };
   }
 
-  it('shows plate selection inline for multi-plate library files', async () => {
+  it('shows the plate picker first for multi-plate library files', async () => {
     mockApi.getLibraryFilePlates.mockResolvedValue(makeMultiPlateLibraryResponse());
     renderWithTracker({
       source: { kind: 'libraryFile', id: 100, filename: 'Multi.3mf' },
       onClose: vi.fn(),
     });
 
-    await waitFor(() => expect(screen.getByText('My Custom X1C')).toBeDefined());
-    const plateSelect = screen.getByRole('combobox', { name: /Plate/i }) as HTMLSelectElement;
-    expect(plateSelect.value).toBe('0');
-    expect(within(plateSelect).getByText('All plates')).toBeDefined();
-    expect(within(plateSelect).getByText(/Plate 2.*Plate 2/)).toBeDefined();
+    await waitFor(() => expect(screen.getByText('Select plate to slice')).toBeDefined());
+    expect(screen.getByRole('button', { name: /All plates/i })).toBeDefined();
+    expect(screen.getByRole('button', { name: /Plate 2.*Pyramid/i })).toBeDefined();
+    expect(mockApi.getSlicerPresets).not.toHaveBeenCalled();
   });
 
   it('skips the plate selector for single-plate sources', async () => {
@@ -580,8 +579,9 @@ describe('SliceModal', () => {
     });
 
     const user = userEvent.setup();
+    await waitFor(() => expect(screen.getByText('Select plate to slice')).toBeDefined());
+    await user.click(screen.getByRole('button', { name: /Plate 2.*Pyramid/i }));
     await waitFor(() => expect(screen.getByText('My Custom X1C')).toBeDefined());
-    await user.selectOptions(screen.getByRole('combobox', { name: /Plate/i }), '2');
 
     await user.click(screen.getByRole('button', { name: /^Slice$/ }));
     await waitFor(() => {
@@ -603,7 +603,7 @@ describe('SliceModal', () => {
       onClose: vi.fn(),
     });
 
-    await waitFor(() => expect(screen.getByRole('combobox', { name: /Plate/i })).toBeDefined());
+    await waitFor(() => expect(screen.getByText('Select plate to slice')).toBeDefined());
     expect(mockApi.getArchivePlates).toHaveBeenCalledWith(100);
     expect(mockApi.getLibraryFilePlates).not.toHaveBeenCalled();
   });
@@ -616,7 +616,7 @@ describe('SliceModal', () => {
       onClose,
     });
 
-    await waitFor(() => expect(screen.getByText('My Custom X1C')).toBeDefined());
+    await waitFor(() => expect(screen.getByText('Select plate to slice')).toBeDefined());
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /^Close$/i }));
@@ -637,8 +637,10 @@ describe('SliceModal', () => {
       onClose: vi.fn(),
     });
 
-    await waitFor(() => expect(screen.getByText('My Custom X1C')).toBeDefined());
     const user = userEvent.setup();
+    await waitFor(() => expect(screen.getByText('Select plate to slice')).toBeDefined());
+    await user.click(screen.getByRole('button', { name: /All plates/i }));
+    await waitFor(() => expect(screen.getByText('My Custom X1C')).toBeDefined());
     await user.click(screen.getByRole('button', { name: /^Slice$/ }));
 
     await waitFor(() => {
