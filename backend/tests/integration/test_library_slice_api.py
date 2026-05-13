@@ -389,17 +389,15 @@ class TestSliceLibraryFile:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_3mf_input_forwarded_unmodified_to_sidecar(
+    async def test_3mf_input_preserves_metadata_files_when_forwarded(
         self, async_client: AsyncClient, db_session, slice_test_setup
     ):
-        # 3MF input must be forwarded to the sidecar verbatim — every
-        # Metadata/*.config the source carries (project_settings,
-        # model_settings, slice_info, cut_information) is needed by the
-        # CLI to find plate definitions and baseline config; an earlier
-        # version of this code stripped them and caused the CLI to
-        # silently exit immediately after "Initializing StaticPrintConfigs"
-        # for every 3MF slice. --load-settings overrides the specific
-        # fields the user changed; the rest comes from the embedded data.
+        # 3MF input must keep every Metadata/*.config the source carries
+        # (project_settings, model_settings, slice_info, cut_information).
+        # The dispatch path may rewrite stale identifiers inside
+        # project_settings so Bambu Studio accepts the selected profiles,
+        # but the files themselves must remain because the CLI needs them
+        # for plate definitions and baseline config.
         src_3mf_path = slice_test_setup["tmp_path"] / "library" / "files" / "real.3mf"
         src_3mf_path.write_bytes(_make_3mf_with_settings({"prime_tower_brim_width": "-1"}))
         threemf = LibraryFile(

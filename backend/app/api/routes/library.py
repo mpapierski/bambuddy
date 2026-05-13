@@ -2819,6 +2819,149 @@ def _extract_source_device_kind_from_3mf_bytes(model_bytes: bytes) -> str | None
         return None
 
 
+def _clean_profile_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if cleaned.startswith("# "):
+        cleaned = cleaned[2:].strip()
+    return cleaned or None
+
+
+def _parse_profile_json(profile_json: str | None) -> dict:
+    if not profile_json:
+        return {}
+    try:
+        data = json.loads(profile_json)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _first_profile_text(data: dict, keys: tuple[str, ...], fallback: str | None = None) -> str | None:
+    for key in keys:
+        value = _clean_profile_text(data.get(key))
+        if value:
+            return value
+    return _clean_profile_text(fallback)
+
+
+def _profile_string_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [cleaned for item in value if (cleaned := _clean_profile_text(item))]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return [cleaned for part in value.replace(";", ",").split(",") if (cleaned := _clean_profile_text(part))]
+        return _profile_string_list(parsed)
+    return []
+
+
+def _profile_compatible_printers(*profiles: dict) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for profile in profiles:
+        for key in ("print_compatible_printers", "compatible_printers"):
+            for item in _profile_string_list(profile.get(key)):
+                if item not in seen:
+                    seen.add(item)
+                    out.append(item)
+    return out
+
+
+def _strip_nozzle_suffix(profile_name: str | None) -> str | None:
+    name = _clean_profile_text(profile_name)
+    if not name:
+        return None
+    return re.sub(r"\s+0\.\d+\s+nozzle$", "", name).strip() or name
+
+
+def _rewrite_3mf_project_settings_for_profiles(
+    zip_bytes: bytes,
+    *,
+    printer_profile_json: str | None = None,
+    process_profile_json: str | None = None,
+    printer_name: str | None = None,
+    process_name: str | None = None,
+) -> bytes:
+    """Align embedded project settings with the selected slice profiles.
+
+    Bambu Studio validates the 3MF's own process/printer compatibility before
+    the external ``--load-settings`` pair can fully override it. Keep the 3MF
+    metadata files present for plate discovery, but rewrite the stale project
+    settings identifiers so cross-device conversion can reach the selected
+    profile path instead of failing on the source process preset.
+    """
+    printer_profile = _parse_profile_json(printer_profile_json)
+    process_profile = _parse_profile_json(process_profile_json)
+    target_printer_name = _first_profile_text(
+        printer_profile,
+        ("printer_settings_id", "name", "inherits", "default_printer_profile"),
+        printer_name,
+    )
+    target_process_name = _first_profile_text(
+        process_profile,
+        ("print_settings_id", "name", "inherits", "default_print_profile"),
+        process_name,
+    )
+    target_printer_model = _first_profile_text(printer_profile, ("printer_model",))
+    if target_printer_model is None:
+        target_printer_model = _strip_nozzle_suffix(target_printer_name)
+
+    compatible_printers = _profile_compatible_printers(process_profile)
+    for candidate in (target_printer_name, target_printer_model):
+        cleaned = _clean_profile_text(candidate)
+        if cleaned and cleaned not in compatible_printers:
+            compatible_printers.append(cleaned)
+
+    if not any((target_printer_name, target_process_name, target_printer_model, compatible_printers)):
+        return zip_bytes
+
+    try:
+        with zipfile.ZipFile(BytesIO(zip_bytes), "r") as zin:
+            if "Metadata/project_settings.config" not in zin.namelist():
+                return zip_bytes
+            try:
+                config = json.loads(zin.read("Metadata/project_settings.config").decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return zip_bytes
+            if not isinstance(config, dict):
+                return zip_bytes
+
+            updates: dict[str, object] = {}
+            if target_printer_name:
+                updates["printer_settings_id"] = target_printer_name
+                updates["default_printer_profile"] = target_printer_name
+            if target_printer_model:
+                updates["printer_model"] = target_printer_model
+            if target_process_name:
+                updates["print_settings_id"] = target_process_name
+                updates["default_print_profile"] = target_process_name
+            if compatible_printers:
+                updates["print_compatible_printers"] = compatible_printers
+                updates["compatible_printers"] = compatible_printers
+
+            changed = False
+            for key, value in updates.items():
+                if config.get(key) != value:
+                    config[key] = value
+                    changed = True
+            if not changed:
+                return zip_bytes
+
+            dst = BytesIO()
+            with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    if item.filename == "Metadata/project_settings.config":
+                        zout.writestr(item, json.dumps(config))
+                    else:
+                        zout.writestr(item, zin.read(item.filename))
+            return dst.getvalue()
+    except (zipfile.BadZipFile, OSError):
+        return zip_bytes
+
+
 async def _run_slicer_with_fallback(
     db: AsyncSession,
     *,
@@ -2933,9 +3076,9 @@ async def _run_slicer_with_fallback(
     # then masked by falling back to slice_without_profiles using the
     # un-stripped bytes (and the source's embedded printer). Net effect:
     # every 3MF slice with profiles silently produced wrong-printer output.
-    # Forwarding the original bytes lets --load-settings override the
-    # specific fields the user changed (printer/process/filament) while
-    # the embedded plate / model definitions remain intact.
+    # Keep the embedded plate / model metadata intact; only project_settings
+    # gets surgical rewrites below for CLI validators that run before
+    # --load-settings can fully replace stale source-profile IDs.
     primary_bytes = model_bytes
     if is_3mf:
         # Strip "-1" inherit-from-parent sentinels from
@@ -2945,6 +3088,18 @@ async def _run_slicer_with_fallback(
         # --load-settings (and the fallback's embedded values for keys we
         # didn't touch) still drive the slice.
         primary_bytes = _sanitize_project_settings_sentinels(primary_bytes)
+        if use_bundle:
+            primary_bytes = _rewrite_3mf_project_settings_for_profiles(
+                primary_bytes,
+                printer_name=request.bundle.printer_name if request.bundle else None,
+                process_name=request.bundle.process_name if request.bundle else None,
+            )
+        else:
+            primary_bytes = _rewrite_3mf_project_settings_for_profiles(
+                primary_bytes,
+                printer_profile_json=presets.get("printer"),
+                process_profile_json=presets.get("process"),
+            )
 
     used_embedded_settings = False
     service = SlicerApiService(api_url)

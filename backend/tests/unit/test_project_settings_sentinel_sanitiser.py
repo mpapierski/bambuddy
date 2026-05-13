@@ -35,6 +35,7 @@ import pytest
 
 from backend.app.api.routes.library import (
     _PROJECT_SETTINGS_SENTINEL_KEYS,
+    _rewrite_3mf_project_settings_for_profiles,
     _sanitize_project_settings_sentinels,
 )
 
@@ -163,6 +164,54 @@ class TestZipPreservation:
         with zipfile.ZipFile(io.BytesIO(sanitised), "r") as zf:
             assert zf.read("Metadata/model_settings.config").decode() == "<config><object id='1'/></config>"
             assert zf.read("3D/3dmodel.model").decode() == "<model><resources/></model>"
+
+
+class TestProjectSettingsProfileRewrite:
+    def test_rewrites_stale_process_and_printer_ids_without_dropping_metadata(self):
+        original = _make_3mf(
+            settings={
+                "printer_model": "Bambu Lab A1 Mini",
+                "printer_settings_id": "Bambu Lab A1 mini 0.4 nozzle",
+                "print_settings_id": "0.16mm Optimal @BBL A1",
+                "print_compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+            },
+            extra_files={
+                "Metadata/model_settings.config": "<config><object id='1'/></config>",
+                "Metadata/slice_info.config": "<config><plate/></config>",
+            },
+        )
+
+        rewritten = _rewrite_3mf_project_settings_for_profiles(
+            original,
+            printer_profile_json=json.dumps(
+                {
+                    "name": "Bambu Lab X1 Carbon 0.4 nozzle",
+                    "printer_model": "Bambu Lab X1 Carbon",
+                    "type": "machine",
+                }
+            ),
+            process_profile_json=json.dumps(
+                {
+                    "name": "0.20mm Standard @BBL X1C",
+                    "compatible_printers": ["Bambu Lab X1 Carbon 0.4 nozzle"],
+                    "type": "process",
+                }
+            ),
+        )
+
+        cfg = _read_settings(rewritten)
+        assert cfg["printer_model"] == "Bambu Lab X1 Carbon"
+        assert cfg["printer_settings_id"] == "Bambu Lab X1 Carbon 0.4 nozzle"
+        assert cfg["default_printer_profile"] == "Bambu Lab X1 Carbon 0.4 nozzle"
+        assert cfg["print_settings_id"] == "0.20mm Standard @BBL X1C"
+        assert cfg["default_print_profile"] == "0.20mm Standard @BBL X1C"
+        assert "Bambu Lab X1 Carbon 0.4 nozzle" in cfg["print_compatible_printers"]
+        assert "Bambu Lab X1 Carbon" in cfg["print_compatible_printers"]
+
+        names = _zip_namelist(rewritten)
+        assert "Metadata/model_settings.config" in names
+        assert "Metadata/slice_info.config" in names
+        assert "3D/3dmodel.model" in names
 
 
 class TestDefensiveFallbacks:
