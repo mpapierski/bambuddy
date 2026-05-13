@@ -2735,15 +2735,49 @@ def _is_scalar_sentinel(value: object, sentinel: int) -> bool:
     return False
 
 
+def _sentinel_metadata_key(key: str | None, value: str | None) -> str | None:
+    if key in _PROJECT_SETTINGS_SENTINEL_KEYS and _is_scalar_sentinel(value, -1):
+        return key
+    if key in _PROJECT_SETTINGS_ZERO_FILAMENT_SENTINEL_KEYS and _is_scalar_sentinel(value, 0):
+        return key
+    return None
+
+
+def _sanitize_model_settings_sentinels(model_settings_bytes: bytes) -> tuple[bytes, list[str]]:
+    import defusedxml.ElementTree as DET
+    from xml.etree import ElementTree as ET
+
+    try:
+        root = DET.fromstring(model_settings_bytes)
+    except DET.ParseError:
+        return model_settings_bytes, []
+
+    removed: list[str] = []
+    for parent in root.iter():
+        for child in list(parent):
+            tag = child.tag.rsplit("}", 1)[-1] if isinstance(child.tag, str) else child.tag
+            if tag != "metadata":
+                continue
+            key = _sentinel_metadata_key(child.get("key"), child.get("value"))
+            if key is None:
+                continue
+            parent.remove(child)
+            removed.append(key)
+
+    if not removed:
+        return model_settings_bytes, []
+    return ET.tostring(root, encoding="utf-8"), removed
+
+
 def _sanitize_project_settings_sentinels(zip_bytes: bytes) -> bytes:
     """Strip inherit/default sentinels from the 3MF's
-    ``Metadata/project_settings.config`` so the slicer CLI's range validator
-    accepts the file (#1201).
+    ``Metadata/project_settings.config`` and ``Metadata/model_settings.config``
+    so the slicer CLI's range validator accepts the file (#1201).
 
     Removes only allowlisted keys (see ``_PROJECT_SETTINGS_SENTINEL_KEYS``)
     when their value is exactly ``-1`` or ``"-1"``, plus allowlisted filament
     assignment keys whose value is exactly ``0`` or ``"0"``. The rest of the
-    config — and every other entry in the zip — is preserved byte-for-byte.
+    config — and every other unchanged entry in the zip — is preserved.
     Unlike the earlier full-strip experiment (see
     ``_strip_3mf_embedded_settings`` and the cautionary comment in
     ``_run_slicer_with_fallback``) this leaves ``StaticPrintConfig``
@@ -2760,37 +2794,54 @@ def _sanitize_project_settings_sentinels(zip_bytes: bytes) -> bytes:
 
     try:
         with zipfile.ZipFile(BytesIO(zip_bytes), "r") as zin:
-            if "Metadata/project_settings.config" not in zin.namelist():
-                return zip_bytes
-            try:
-                config = json.loads(zin.read("Metadata/project_settings.config").decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                return zip_bytes
-            if not isinstance(config, dict):
-                return zip_bytes
-            removed = [
-                key for key in _PROJECT_SETTINGS_SENTINEL_KEYS if _is_scalar_sentinel(config.get(key), -1)
-            ]
-            removed.extend(
-                key
-                for key in _PROJECT_SETTINGS_ZERO_FILAMENT_SENTINEL_KEYS
-                if _is_scalar_sentinel(config.get(key), 0)
-            )
+            patched_project_settings: str | None = None
+            patched_model_settings: bytes | None = None
+            removed: list[str] = []
+
+            if "Metadata/project_settings.config" in zin.namelist():
+                try:
+                    config = json.loads(zin.read("Metadata/project_settings.config").decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    config = None
+                if isinstance(config, dict):
+                    project_removed = [
+                        key for key in _PROJECT_SETTINGS_SENTINEL_KEYS if _is_scalar_sentinel(config.get(key), -1)
+                    ]
+                    project_removed.extend(
+                        key
+                        for key in _PROJECT_SETTINGS_ZERO_FILAMENT_SENTINEL_KEYS
+                        if _is_scalar_sentinel(config.get(key), 0)
+                    )
+                    for key in set(project_removed):
+                        config.pop(key, None)
+                    if project_removed:
+                        patched_project_settings = json.dumps(config)
+                        removed.extend(project_removed)
+
+            if "Metadata/model_settings.config" in zin.namelist():
+                patched_model_settings, model_removed = _sanitize_model_settings_sentinels(
+                    zin.read("Metadata/model_settings.config")
+                )
+                if model_removed:
+                    removed.extend(model_removed)
+                else:
+                    patched_model_settings = None
+
             if not removed:
                 return zip_bytes
-            for key in set(removed):
-                config.pop(key, None)
-            patched = json.dumps(config)
+
             logger.info(
-                "3MF sanitiser: removed project_settings sentinel values for keys %s — "
+                "3MF sanitiser: removed embedded config sentinel values for keys %s — "
                 "slicer will use --load-settings defaults",
                 sorted(removed),
             )
             dst = BytesIO()
             with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
                 for item in zin.infolist():
-                    if item.filename == "Metadata/project_settings.config":
-                        zout.writestr(item, patched)
+                    if item.filename == "Metadata/project_settings.config" and patched_project_settings is not None:
+                        zout.writestr(item, patched_project_settings)
+                    elif item.filename == "Metadata/model_settings.config" and patched_model_settings is not None:
+                        zout.writestr(item, patched_model_settings)
                     else:
                         zout.writestr(item, zin.read(item.filename))
             return dst.getvalue()

@@ -32,6 +32,7 @@ slicer mock needed.
 import io
 import json
 import zipfile
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -66,6 +67,11 @@ def _read_settings(zip_bytes: bytes) -> dict:
 def _zip_namelist(zip_bytes: bytes) -> list[str]:
     with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
         return zf.namelist()
+
+
+def _read_text_entry(zip_bytes: bytes, name: str) -> str:
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
+        return zf.read(name).decode("utf-8")
 
 
 class TestRemovesSentinelValues:
@@ -110,6 +116,35 @@ class TestRemovesSentinelValues:
         assert "solid_infill_filament" not in cfg
         assert "sparse_infill_filament" not in cfg
         assert cfg["layer_height"] == "0.2"
+
+    def test_removes_model_settings_metadata_sentinels_without_dropping_structure(self):
+        original = _make_3mf(
+            settings={"layer_height": "0.2"},
+            extra_files={
+                "Metadata/model_settings.config": """
+                    <config>
+                      <object id="1">
+                        <metadata key="name" value="Ace"/>
+                        <metadata key="wall_filament" value="0"/>
+                        <metadata key="tree_support_wall_count" value="-1"/>
+                        <part id="2">
+                          <metadata key="solid_infill_filament" value="0"/>
+                          <metadata key="extruder" value="1"/>
+                        </part>
+                      </object>
+                    </config>
+                """,
+            },
+        )
+
+        sanitised = _sanitize_project_settings_sentinels(original)
+        root = ET.fromstring(_read_text_entry(sanitised, "Metadata/model_settings.config"))
+        metadata = {(node.get("key"), node.get("value")) for node in root.findall(".//metadata")}
+        assert ("wall_filament", "0") not in metadata
+        assert ("tree_support_wall_count", "-1") not in metadata
+        assert ("solid_infill_filament", "0") not in metadata
+        assert ("name", "Ace") in metadata
+        assert ("extruder", "1") in metadata
 
     @pytest.mark.parametrize("key", sorted(_PROJECT_SETTINGS_ZERO_FILAMENT_SENTINEL_KEYS))
     @pytest.mark.parametrize("value", [0, "0"])
