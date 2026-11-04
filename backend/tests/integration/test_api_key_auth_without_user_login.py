@@ -87,12 +87,28 @@ async def test_printer_restricted_keys_fail_closed_on_unreviewed_stable_routes(
     headers = {"X-API-Key": key}
 
     assert (await async_client.get("/api/v1/auth/me", headers=headers)).status_code == 200
+    assert (await async_client.get("/api/v1/auth/scoped-api-key-check", headers=headers)).status_code == 200
     assert (await async_client.get(f"/api/v1/printers/{visible.id}/status", headers=headers)).status_code == 200
     assert (await async_client.get(f"/api/v1/printers/{hidden.id}/status", headers=headers)).status_code == 404
     assert (await async_client.get(f"/api/v1/printers/{visible.id}/cover", headers=headers)).status_code == 403
     queue = await async_client.get("/api/v1/webhook/queue", headers=headers)
     assert queue.status_code == 200
     assert [printer["printer_id"] for printer in queue.json()] == [visible.id]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("native_auth", [False, True])
+async def test_proxy_probe_requires_enabled_scoped_key_enforcement(
+    async_client, db_session, enforce_keys, monkeypatch, native_auth
+):
+    await _set_user_auth(db_session, native_auth)
+    key = await _key(db_session)
+    path = "/api/v1/auth/scoped-api-key-check"
+    assert (await async_client.get(path, headers={"X-API-Key": key})).status_code == 200
+    assert (await async_client.get(path, headers={"X-API-Key": "bb_invalid"})).status_code == 401
+    assert (await async_client.get(path)).status_code in (401, 403)
+    monkeypatch.setattr(settings, "api_key_auth_when_auth_disabled", False)
+    assert (await async_client.get(path, headers={"X-API-Key": key})).status_code == 403
 
 
 @pytest.mark.integration

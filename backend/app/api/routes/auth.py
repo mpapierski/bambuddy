@@ -21,6 +21,7 @@ from backend.app.core.auth import (
     RequirePermissionIfAuthEnabled,
     _is_token_fresh,
     _validate_api_key,
+    api_key_request_is_enforced,
     apikey_effective_permissions,
     authenticate_user,
     authenticate_user_by_email,
@@ -686,6 +687,14 @@ async def mint_media_token(
     """
     username = current_user.username if current_user is not None else None
     return {"token": await create_media_token(username)}
+
+
+@router.get("/scoped-api-key-check", include_in_schema=False)
+async def check_scoped_api_key_mode() -> dict[str, bool]:
+    """Let the homelab proxy fail closed if scoped key enforcement is absent."""
+    if not api_key_request_is_enforced():
+        raise HTTPException(status_code=403, detail="Scoped API key enforcement is not active")
+    return {"scoped_api_key_auth": True}
 
 
 @router.get("/me", response_model=UserResponse)

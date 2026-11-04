@@ -12,6 +12,7 @@ from starlette.routing import Match
 _SAFE_PUBLIC_KEY_ROUTES = frozenset(
     {
         ("GET", "/api/v1/auth/me"),
+        ("GET", "/api/v1/auth/scoped-api-key-check"),
         ("GET", "/api/v1/auth/status"),
         ("GET", "/api/v1/auth/advanced-auth/status"),
         ("GET", "/api/v1/auth/ldap/status"),

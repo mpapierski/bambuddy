@@ -10635,7 +10635,8 @@ async def scoped_api_key_middleware(request, call_next):
             method == "POST"
             and re.fullmatch(r"/api/v1/webhook/(?:queue/add|printer/[0-9]+/(?:start|stop|cancel))", path)
         )
-        if not (safe_printers or safe_webhook or (method == "GET" and path == "/api/v1/auth/me")):
+        safe_probe = method == "GET" and path in {"/api/v1/auth/me", "/api/v1/auth/scoped-api-key-check"}
+        if not (safe_printers or safe_webhook or safe_probe):
             return JSONResponse(status_code=403, content={"detail": "Printer-restricted keys cannot use this endpoint"})
 
     principal = _enforced_api_key_request.set(True)
