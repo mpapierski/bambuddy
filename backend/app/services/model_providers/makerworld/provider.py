@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from backend.app.core.auth import api_key_request_is_enforced
 from backend.app.core.permissions import Permission
 from backend.app.services.model_providers.base import (
     ModelProvider,
@@ -78,7 +79,10 @@ class MakerWorldProvider(ModelProvider):
         flag those installs read back on the status endpoints.
         """
         identity = user if user is not None else api_key_owner
-        token, _email, _region = await get_stored_token(db, identity)
+        if identity is None and api_key_request_is_enforced():
+            token = None
+        else:
+            token, _email, _region = await get_stored_token(db, identity)
         user_id = identity.id if identity is not None else None
         return MakerWorldService(
             client=client,

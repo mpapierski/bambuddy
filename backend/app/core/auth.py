@@ -511,7 +511,7 @@ def require_api_key_scope(
         x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     ) -> ScopedCaller:
         async with async_session() as db:
-            if not await is_auth_enabled(db):
+            if not await is_request_auth_enabled(db):
                 return ScopedCaller()
 
             credentials_exception = HTTPException(
@@ -1263,6 +1263,18 @@ async def is_auth_enabled(db: AsyncSession) -> bool:
     return enabled
 
 
+# Scope request authorization without changing the installation-wide login mode.
+_enforced_api_key_request: ContextVar[bool] = ContextVar("enforced_api_key_request", default=False)
+
+
+def api_key_request_is_enforced() -> bool:
+    return _enforced_api_key_request.get()
+
+
+async def is_request_auth_enabled(db: AsyncSession) -> bool:
+    return api_key_request_is_enforced() or await is_auth_enabled(db)
+
+
 async def _user_from_api_key(db: AsyncSession, api_key: APIKey) -> User | None:
     """Resolve the owner of a validated API key, or None for legacy ownerless keys.
 
@@ -1440,7 +1452,7 @@ async def require_auth_if_enabled(
     #1182 was designed to expose.
     """
     async with async_session() as db:
-        auth_enabled = await is_auth_enabled(db)
+        auth_enabled = await is_request_auth_enabled(db)
         if not auth_enabled:
             return None
 
@@ -1558,7 +1570,7 @@ def require_admin_if_auth_enabled():
         x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     ) -> User | None:
         async with async_session() as db:
-            if not await is_auth_enabled(db):
+            if not await is_request_auth_enabled(db):
                 return None  # Auth disabled — no role to check.
 
             # Reject API-keyed requests up front: admin is a user-role
@@ -1833,6 +1845,16 @@ async def current_api_key_if_present(
     return await validated_api_key_from_request(credentials, x_api_key)
 
 
+async def enforced_api_key_if_present(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> APIKey | None:
+    """Resolve a key only for the opt-in scoped request mode."""
+    if not api_key_request_is_enforced():
+        return None
+    return await validated_api_key_from_request(credentials, x_api_key)
+
+
 def require_printer_permission_if_auth_enabled(permission: str | Permission):
     """Require a permission and enforce an API key's per-printer allowlist."""
 
@@ -1962,7 +1984,7 @@ def require_permission_if_auth_enabled(*permissions: str | Permission):
         x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     ) -> User | None:
         async with async_session() as db:
-            auth_enabled = await is_auth_enabled(db)
+            auth_enabled = await is_request_auth_enabled(db)
             if not auth_enabled:
                 return None  # Auth disabled, allow access
 
@@ -2101,7 +2123,7 @@ def require_any_permission_if_auth_enabled(*permissions: str | Permission):
         x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     ) -> User | None:
         async with async_session() as db:
-            auth_enabled = await is_auth_enabled(db)
+            auth_enabled = await is_request_auth_enabled(db)
             if not auth_enabled:
                 return None
 
@@ -2201,6 +2223,8 @@ def require_camera_stream_token_if_auth_enabled():
     """
 
     async def checker(token: str | None = None) -> None:
+        if api_key_request_is_enforced():
+            raise HTTPException(status_code=403, detail="This endpoint requires its own token")
         async with async_session() as db:
             if not await is_auth_enabled(db):
                 return  # Auth disabled, allow access
@@ -2224,6 +2248,8 @@ def require_camwall_token_if_auth_enabled():
     """
 
     async def checker(token: str | None = None) -> None:
+        if api_key_request_is_enforced():
+            raise HTTPException(status_code=403, detail="This endpoint requires its own token")
         async with async_session() as db:
             if not await is_auth_enabled(db):
                 return  # Auth disabled, allow access
@@ -2249,6 +2275,8 @@ def require_overlay_token_if_auth_enabled():
     """
 
     async def checker(token: str | None = None) -> None:
+        if api_key_request_is_enforced():
+            raise HTTPException(status_code=403, detail="This endpoint requires its own token")
         async with async_session() as db:
             if not await is_auth_enabled(db):
                 return  # Auth disabled, allow access
@@ -2300,7 +2328,7 @@ def require_ownership_permission(
         - can_modify_all=False: user can only modify their own items
         """
         async with async_session() as db:
-            auth_enabled = await is_auth_enabled(db)
+            auth_enabled = await is_request_auth_enabled(db)
             if not auth_enabled:
                 return None, True  # Auth disabled, allow all
 
@@ -2439,9 +2467,9 @@ def require_media_token_permission(*permissions: str | Permission):
         x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     ) -> User | None:
         async with async_session() as db:
-            if not await is_auth_enabled(db):
+            if not await is_request_auth_enabled(db):
                 return None  # Auth disabled, allow access
-        if token:
+        if token and not api_key_request_is_enforced():
             user = await _user_from_media_token(token)
             missing = [p for p in perm_strings if not user.has_permission(p)]
             if missing:
@@ -2483,9 +2511,9 @@ def require_media_token_ownership(
         x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     ) -> tuple[User | None, bool]:
         async with async_session() as db:
-            if not await is_auth_enabled(db):
+            if not await is_request_auth_enabled(db):
                 return None, True  # Auth disabled, allow all
-        if token:
+        if token and not api_key_request_is_enforced():
             user = await _user_from_media_token(token)
             if user.has_permission(all_perm):
                 return user, True

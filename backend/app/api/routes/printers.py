@@ -16,6 +16,8 @@ from backend.app.core.auth import (
     RequireOverlayTokenIfAuthEnabled,
     RequirePermissionIfAuthEnabled,
     RequirePrinterPermissionIfAuthEnabled,
+    api_key_request_is_enforced,
+    enforced_api_key_if_present,
     is_auth_enabled,
     require_media_token_permission,
     require_media_token_printer_permission,
@@ -25,6 +27,7 @@ from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.core.tasks import spawn_background_task
 from backend.app.models.ams_label import AmsLabel
+from backend.app.models.api_key import APIKey
 from backend.app.models.printer import Printer
 from backend.app.models.slot_preset import SlotPresetMapping
 from backend.app.models.user import User
@@ -122,6 +125,8 @@ async def _caller_can_view_printer_secrets(user: User | None, db: AsyncSession) 
       API keys) → False. PRINTERS_UPDATE is admin-only and absent from
       ``_APIKEY_SCOPE_BY_PERMISSION``, so no API key can hold it.
     """
+    if api_key_request_is_enforced():
+        return False
     if not await is_auth_enabled(db):
         return True
     if user is None:
@@ -140,6 +145,7 @@ def _serialize_printer(printer: Printer, *, include_secret: bool):
 async def list_printers(
     user: User | None = RequirePermissionIfAuthEnabled(Permission.PRINTERS_READ),
     db: AsyncSession = Depends(get_db),
+    api_key: APIKey | None = Depends(enforced_api_key_if_present),
 ):
     """List all configured printers.
 
@@ -149,6 +155,8 @@ async def list_printers(
     """
     result = await db.execute(select(Printer).order_by(Printer.name))
     printers = list(result.scalars().all())
+    if api_key_request_is_enforced() and api_key is not None and api_key.printer_ids is not None:
+        printers = [printer for printer in printers if printer.id in api_key.printer_ids]
     include_secret = await _caller_can_view_printer_secrets(user, db)
     return [_serialize_printer(p, include_secret=include_secret) for p in printers]
 
@@ -355,6 +363,7 @@ async def get_printer(
     printer_id: int,
     user: User | None = RequirePermissionIfAuthEnabled(Permission.PRINTERS_READ),
     db: AsyncSession = Depends(get_db),
+    api_key: APIKey | None = Depends(enforced_api_key_if_present),
 ):
     """Get a specific printer.
 
@@ -362,6 +371,9 @@ async def get_printer(
     (Admin / Operator JWT, or auth-disabled mode). Viewers and API keys
     never receive it.
     """
+    if api_key_request_is_enforced() and api_key is not None and api_key.printer_ids is not None:
+        if printer_id not in api_key.printer_ids:
+            raise HTTPException(404, "Printer not found")
     result = await db.execute(select(Printer).where(Printer.id == printer_id))
     printer = result.scalar_one_or_none()
     if not printer:
@@ -482,8 +494,12 @@ async def get_printer_status(
     printer_id: int,
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_READ),
     db: AsyncSession = Depends(get_db),
+    api_key: APIKey | None = Depends(enforced_api_key_if_present),
 ):
     """Get real-time status of a printer."""
+    if api_key_request_is_enforced() and api_key is not None and api_key.printer_ids is not None:
+        if printer_id not in api_key.printer_ids:
+            raise HTTPException(404, "Printer not found")
     result = await db.execute(select(Printer).where(Printer.id == printer_id))
     printer = result.scalar_one_or_none()
     if not printer:

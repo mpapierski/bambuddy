@@ -26,7 +26,11 @@ from backend.app.api.routes.orca_cloud import (
     _build_authenticated_service as _build_orca_service,
     _load_credentials as _load_orca_credentials,
 )
-from backend.app.core.auth import RequirePermissionIfAuthEnabled, require_ownership_permission
+from backend.app.core.auth import (
+    RequirePermissionIfAuthEnabled,
+    api_key_request_is_enforced,
+    require_ownership_permission,
+)
 from backend.app.core.config import settings as app_settings
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
@@ -119,6 +123,8 @@ async def _fetch_cloud_presets(
     """
     if user is not None and not user.has_permission(Permission.CLOUD_AUTH.value):
         return _empty_slots(), "not_authenticated"
+    if user is None and api_key_request_is_enforced():
+        return _empty_slots(), "not_authenticated"
 
     token, _email, region = await get_stored_token(db, user)
     if not token:
@@ -198,6 +204,8 @@ async def _fetch_orca_cloud_presets(
     enrichment is free here.
     """
     if user is not None and not user.has_permission(Permission.ORCA_CLOUD_AUTH.value):
+        return _empty_slots(), "not_authenticated"
+    if user is None and api_key_request_is_enforced():
         return _empty_slots(), "not_authenticated"
 
     creds = await _load_orca_credentials(db, user)

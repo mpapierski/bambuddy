@@ -30,6 +30,7 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.routes.orca_cloud import _build_authenticated_service as _build_orca_service
+from backend.app.core.auth import api_key_request_is_enforced
 from backend.app.core.permissions import Permission
 from backend.app.models.local_preset import LocalPreset
 from backend.app.models.user import User
@@ -121,6 +122,8 @@ async def _resolve_cloud(db: AsyncSession, user: User | None, ref: PresetRef, sl
             status_code=403,
             detail=f"Cloud presets require the cloud:auth permission ({slot})",
         )
+    if user is None and api_key_request_is_enforced():
+        raise HTTPException(status_code=403, detail=f"Cloud presets require a cloud-enabled key owner ({slot})")
 
     token, _email, region = await get_stored_token(db, user)
     if not token:
@@ -198,6 +201,8 @@ async def _resolve_orca_cloud(db: AsyncSession, user: User | None, ref: PresetRe
             status_code=403,
             detail=f"Orca Cloud presets require the orca_cloud:auth permission ({slot})",
         )
+    if user is None and api_key_request_is_enforced():
+        raise HTTPException(status_code=403, detail=f"Orca Cloud presets require a cloud-enabled key owner ({slot})")
 
     try:
         svc = await _build_orca_service(db, user)
